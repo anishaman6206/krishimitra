@@ -1,42 +1,67 @@
 # backend/app/tools/weather.py
 import httpx
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
 async def forecast_24h(lat: float, lon: float, tz: str = "auto") -> Dict[str, Any]:
     """
-    Fetch hourly temp, precip, wind for next 24h from Open-Meteo (no API key).
-    Returns a compact summary we can use for irrigation logic.
+    Hourly next-24h + compact 7-day daily highs/lows (no API key).
     """
     params = {
         "latitude": lat,
         "longitude": lon,
+        # hourly for next-24h decisioning
         "hourly": "temperature_2m,precipitation,wind_speed_10m,relative_humidity_2m",
-        "daily": "precipitation_sum,temperature_2m_max,temperature_2m_min,wind_speed_10m_max",
-        "forecast_days": 2,   # keeping it light for hackathon
+        # daily block for 7-day min/max reasoning
+        "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,wind_speed_10m_max",
+        "forecast_days": 7,
         "timezone": tz,
+        "temperature_unit": "celsius",
+        "windspeed_unit": "kmh",   # <-- correct unit param (avoids earlier 500s)
     }
     async with httpx.AsyncClient(timeout=20) as client:
         r = await client.get(OPEN_METEO_URL, params=params)
         r.raise_for_status()
         data = r.json()
 
-    # Build a tiny summary for the next ~24h
-    hr = data.get("hourly", {})
-    times = hr.get("time", [])[:24]
-    temps = hr.get("temperature_2m", [])[:24]
-    rains = hr.get("precipitation", [])[:24]
-    winds = hr.get("wind_speed_10m", [])[:24]
+    hr = data.get("hourly", {}) or {}
+    times = (hr.get("time") or [])[:24]
+    temps = (hr.get("temperature_2m") or [])[:24]
+    rains = (hr.get("precipitation") or [])[:24]
+    winds = (hr.get("wind_speed_10m") or [])[:24]  # km/h due to windspeed_unit
 
     total_rain = float(sum(x or 0.0 for x in rains)) if rains else 0.0
     max_temp = float(max(temps)) if temps else None
-    max_wind = float(max(winds)) if winds else None
+    max_wind_kmh = float(max(winds)) if winds else None
+
+    # Build compact 7-day list
+    daily = data.get("daily", {}) or {}
+    dtime: List[str] = daily.get("time") or []
+    tmax:  List[float] = daily.get("temperature_2m_max") or []
+    tmin:  List[float] = daily.get("temperature_2m_min") or []
+    rain:  List[float] = daily.get("precipitation_sum") or []
+    prob:  List[float] = daily.get("precipitation_probability_max") or []
+    wmax:  List[float] = daily.get("wind_speed_10m_max") or []
+
+    daily_list = []
+    for i in range(min(len(dtime), len(tmax), len(tmin))):
+        daily_list.append({
+            "date": dtime[i],
+            "tmax_c": None if tmax[i] is None else float(tmax[i]),
+            "tmin_c": None if tmin[i] is None else float(tmin[i]),
+            "rain_mm": None if i >= len(rain) or rain[i] is None else float(rain[i]),
+            "rain_chance_pct": None if i >= len(prob) or prob[i] is None else float(prob[i]),
+            "wind_kmh_max": None if i >= len(wmax) or wmax[i] is None else float(wmax[i]),
+        })
 
     return {
-        "lat": lat, "lon": lon, "times": times,
+        "lat": lat,
+        "lon": lon,
+        "times": times,
         "total_rain_next_24h_mm": total_rain,
         "max_temp_next_24h_c": max_temp,
-        "max_wind_next_24h_ms": max_wind,
+        "max_wind_next_24h_kmh": max_wind_kmh,
+        "daily": daily_list,               # <-- 7-day highs/lows here
         "source": "Open-Meteo",
     }

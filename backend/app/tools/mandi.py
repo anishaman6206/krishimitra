@@ -8,6 +8,8 @@ import httpx
 import xml.etree.ElementTree as ET
 from app.utils.cache import cache
 
+from statistics import median
+import datetime as _dt
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -113,7 +115,7 @@ async def _fetch_xml_records(commodity: str, limit: int = 200, offset: int = 0) 
         })
     return out
 
-async def _fetch_recent_records(commodity: str, pages: int = 3, page_size: int = 200) -> List[Dict[str, Any]]:
+async def _fetch_recent_records(commodity: str, pages: int = 5, page_size: int = 200) -> List[Dict[str, Any]]:
     """Fetch a few pages of data for a commodity."""
     all_recs: List[Dict[str, Any]] = []
     for i in range(pages):
@@ -185,6 +187,63 @@ async def latest_price(
     
     cache.set(key, best)
     return best
+
+
+# --- add price_series ---
+
+async def price_series(
+    commodity: str,
+    state: str | None = None,
+    district: str | None = None,
+    market: str | None = None,
+    days: int = 90,
+    debug: bool = False
+) -> list[dict]:
+    """
+    Returns a list of {date: 'YYYY-MM-DD', modal_price: int} for the last <= `days` days.
+    Aggregates by daily median of matching rows.
+    """
+    # pull plenty, we will trim by date afterwards
+    recs = await _fetch_recent_records(commodity, pages=5, page_size=200)
+    if debug:
+        print(f"[DEBUG] series fetched raw={len(recs)} rows for commodity='{commodity}'")
+
+    # normalize + (soft) filter by provided geography
+    rows = []
+    for r in recs:
+        nr = _normalize_item(r)
+        if state    and not _ci_eq(nr["state"], state):         continue
+        if district and not _ci_eq(nr["district"], district):   continue
+        if market   and not _ci_eq(nr["market"], market):       continue
+        if nr["modal_price_inr_per_qtl"] is None:               continue
+        try:
+            d = _dt.datetime.strptime(nr["arrival_date"], "%Y-%m-%d").date()
+        except Exception:
+            continue
+        rows.append((d, nr["modal_price_inr_per_qtl"]))
+
+    # if too few after strict filter, relax to state-only, then commodity-only
+    if len(rows) < 5 and (district or market):
+        if debug: print("[DEBUG] few rows after strict filter → relaxing to state-only")
+        return await price_series(commodity, state=state, district=None, market=None, days=days, debug=debug)
+    if len(rows) < 5 and state:
+        if debug: print("[DEBUG] few rows after state-only → relaxing to commodity-only")
+        return await price_series(commodity, state=None, district=None, market=None, days=days, debug=debug)
+
+    by_day = {}
+    for d, p in rows:
+        by_day.setdefault(d, []).append(p)
+
+    # daily median
+    series = []
+    cutoff = _dt.date.today() - _dt.timedelta(days=days)
+    for d in sorted(by_day.keys()):
+        if d < cutoff:
+            continue
+        series.append({"date": d.isoformat(), "modal_price": int(median(by_day[d]))})
+
+    return series
+
 
 # -------------------------------
 # Command-Line Interface for Testing

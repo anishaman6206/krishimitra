@@ -12,6 +12,9 @@ langchain-core>=0.2.17,<0.3.0
 langchain-community>=0.2.12,<0.3.0
 langchain-openai>=0.1.17,<0.2.0
 openai>=1.30,<2
+langchain-chroma>=0.1.2,<0.2
+chromadb>=0.5.5,<0.6
+
 
 # Vector store + retrieval
 chromadb>=0.5.3,<0.6
@@ -19,7 +22,7 @@ rank-bm25>=0.2.2,<0.3
 
 # Loaders & utils
 pypdf>=4.2,<5
-pandas>=2.2,<3
+pandas>=2.0,<3
 numpy>=1.26,<2
 
 # Satellite
@@ -27,3 +30,12 @@ sentinelhub>=3.10,<4
 
 # Testing 
 pytest>=8,<9
+Pillow>=10.0.0
+
+
+lightgbm==4.3.0
+joblib>=1.3
+scikit-learn==1.4.2
+matplotlib>=3.8
+
+
