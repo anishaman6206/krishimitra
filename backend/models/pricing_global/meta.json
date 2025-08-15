@@ -1,0 +1,46 @@
+{
+  "features": [
+    "doy",
+    "dow",
+    "month",
+    "commodity_id",
+    "state_id",
+    "district_id",
+    "market_id",
+    "variety_id",
+    "grade_id",
+    "lag_1",
+    "lag_7",
+    "lag_14",
+    "lag_28",
+    "rollmean_7",
+    "rollmean_14",
+    "rollmean_28",
+    "rollstd_7",
+    "rollstd_14",
+    "rollstd_28"
+  ],
+  "mae_val": 213.81574001277048,
+  "n_train": 749327,
+  "n_valid": 184742,
+  "cats": [
+    "commodity_id",
+    "state_id",
+    "district_id",
+    "market_id",
+    "variety_id",
+    "grade_id"
+  ],
+  "key_cols": [
+    "commodity",
+    "state",
+    "district",
+    "market"
+  ],
+  "note": "Global LightGBM quantile models (p20,p50,p80). Lags/rolls are per (commodity,state,district,market).",
+  "resid_median": 2.526545125584107,
+  "resid_std": 538.6608509200574,
+  "coverage_p50": 0.4655627848567191,
+  "coverage_p80": 0.7528066167953146,
+  "coverage_p20": 0.20317523898193157
+}
