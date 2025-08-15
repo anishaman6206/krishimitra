@@ -7,6 +7,10 @@ from typing import Optional, Dict, Any
 from dotenv import load_dotenv
 from pathlib import Path
 import httpx
+# Add these imports at the top of the file
+import sys
+sys.path.append(str(Path(__file__).parents[2] / "backend"))
+from app.tools.lang import translate_to_en, translate_from_en
 
 from telegram import (
     Update,
@@ -72,9 +76,10 @@ def _reply_kb():
         one_time_keyboard=False,
     )
 
-async def _ask_backend(prompt: str, prefs: ChatPrefs, debug: bool = False) -> Dict[str, Any]:
+async def _ask_backend(prompt: str, prefs: ChatPrefs, detected_lang: str = "en", debug: bool = False) -> Dict[str, Any]:
     payload = {
         "text": prompt,
+        "lang": detected_lang,  # Pass detected language to backend
         "crop": prefs.crop,
         "state": prefs.state,
         "district": prefs.district,
@@ -89,6 +94,7 @@ async def _ask_backend(prompt: str, prefs: ChatPrefs, debug: bool = False) -> Di
         r = await client.post(ASK_URL, json=payload)
         r.raise_for_status()
         return r.json()
+    
 
 def _followup_buttons(resp: Dict[str, Any]) -> InlineKeyboardMarkup | None:
     btns = []
@@ -194,12 +200,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # little UX hint: show “typing…”
     try:
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-    except Exception:
-        pass
-
-
-    try:
-        resp = await _ask_backend(text, prefs)
+        
+        # For text messages, assume English unless you implement language detection
+        resp = await _ask_backend(text, prefs, "en")  # Add language parameter
         prefs.last_tool_notes = resp.get("tool_notes") or {}
         answer = resp.get("answer") or "I couldn't form an answer."
         kb = _followup_buttons(resp)
@@ -269,6 +272,144 @@ async def on_text_market(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Format: Set market: Karnataka, Bangalore, Ramanagara"
         )
 
+
+
+async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from voice_utils import opus_to_wav, wav_to_opus, sarvam_stt, text_to_speech
+    import hashlib
+    
+    chat_id = update.effective_chat.id
+    prefs = _prefs(context, chat_id)
+    
+    try:
+        # Show typing indicator
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        
+        # 1-3. Download, convert, and transcribe (same as before)
+        file_id = update.message.voice.file_id
+        file = await context.bot.get_file(file_id)
+        short_id = hashlib.md5(file_id.encode()).hexdigest()[:12]
+        
+        input_ogg = f"voice_{chat_id}_{short_id}.ogg"
+        await file.download_to_drive(input_ogg)
+        
+        input_wav = f"voice_{chat_id}_{short_id}.wav"
+        await opus_to_wav(input_ogg, input_wav)
+        
+        transcript, detected_lang = await sarvam_stt(input_wav)
+        
+        if not transcript.strip():
+            await update.message.reply_text("Sorry, I couldn't understand the audio.")
+            return
+        
+        print(f"STT Result: '{transcript}' (Language: {detected_lang})")
+        
+        # 4. Send original transcript with detected language to backend
+        # Backend will handle translation internally
+        resp = await _ask_backend(transcript, prefs, detected_lang)
+        answer_local = resp.get("answer", "I couldn't form an answer.")  # Backend returns translated answer
+        print(f"Backend response: {resp}")
+
+        # 5. Send text reply (backend already translated if needed)
+        voice_keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔊 Hear this answer", callback_data=f"hear_{short_id}")
+        ]])
+        
+        await update.message.reply_text(
+            f"📝 {answer_local}", 
+            reply_markup=voice_keyboard
+        )
+        
+        # 6. Store answer for voice generation
+        context.user_data[f"hear_{short_id}"] = {
+            "text": answer_local,
+            "language": detected_lang,
+            "chat_id": chat_id
+        }
+        
+        # 7. Clean up input files
+        import os
+        for f in [input_ogg, input_wav]:
+            try:
+                if os.path.exists(f):
+                    os.remove(f)
+            except:
+                pass
+                
+    except Exception as e:
+        print(f"Voice processing error: {e}")
+        await update.message.reply_text(f"Sorry, there was an error processing your voice message: {e}")
+
+
+# Update handle_voice_request to use short_id:
+async def handle_voice_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle when user clicks 'Hear this answer' button"""
+    query = update.callback_query
+    await query.answer()
+    
+    # Extract short_id from callback data
+    if not query.data.startswith("hear_"):
+        return
+    
+    short_id = query.data[5:]  # Remove "hear_" prefix
+    answer_data = context.user_data.get(f"hear_{short_id}")
+    
+    if not answer_data:
+        await query.edit_message_text("Sorry, this answer has expired. Please ask your question again.")
+        return
+    
+    answer_text = answer_data["text"]
+    language = answer_data["language"]
+    chat_id = answer_data["chat_id"]
+    
+    try:
+        from voice_utils import text_to_speech, wav_to_opus
+        
+        # Show that we're generating voice
+        await query.edit_message_text(f"🔊 Generating voice reply...\n\n📝 {answer_text}")
+        
+        # Generate voice reply
+        reply_wav = f"reply_{chat_id}_{short_id}.wav"
+        
+        # Pass language to TTS for better pronunciation
+        tts_lang = f"{language}-IN" if language != "en" else "en-IN"
+        await text_to_speech(answer_text, reply_wav, "default", tts_lang)
+        
+        # Convert to OGG/Opus for Telegram
+        reply_ogg = f"reply_{chat_id}_{short_id}.ogg"
+        await wav_to_opus(reply_wav, reply_ogg)
+        
+        # Send voice message
+        with open(reply_ogg, "rb") as voice_file:
+            await context.bot.send_voice(chat_id, voice=voice_file)
+        
+        # Update the button to show it's been sent
+        sent_keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Voice sent!", callback_data="voice_sent")
+        ]])
+        await query.edit_message_reply_markup(reply_markup=sent_keyboard)
+        
+        # Clean up files
+        import os
+        for f in [reply_wav, reply_ogg]:
+            try:
+                if os.path.exists(f):
+                    os.remove(f)
+            except:
+                pass
+        
+        # Clean up stored data
+        del context.user_data[f"hear_{short_id}"]
+        
+    except Exception as e:
+        await query.edit_message_text(f"Sorry, there was an error generating voice: {e}")
+
+# Add a handler for the "Voice sent!" button (just to acknowledge)
+async def handle_voice_sent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("Voice message sent! 🎉")
+
+# Update the main() function to include the new handlers:
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -280,8 +421,13 @@ def main():
     app.add_handler(MessageHandler(filters.LOCATION, on_location))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"^Set market:"), on_text_market))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_handler(MessageHandler(filters.VOICE, on_voice))
 
-    app.add_handler(CallbackQueryHandler(on_callback))
+    # Add new callback handlers for voice functionality
+    app.add_handler(CallbackQueryHandler(handle_voice_request, pattern="^hear_"))
+    app.add_handler(CallbackQueryHandler(handle_voice_sent, pattern="^voice_sent$"))
+    app.add_handler(CallbackQueryHandler(on_callback))  # Keep existing callback handler for other buttons
+    
     app.add_error_handler(error_handler)
 
     app.run_polling(drop_pending_updates=True)
