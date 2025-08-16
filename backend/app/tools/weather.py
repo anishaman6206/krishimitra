@@ -1,6 +1,6 @@
 # backend/app/tools/weather.py
-import httpx
 from typing import Dict, Any, List
+from app.http import get_http_client
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
@@ -20,10 +20,12 @@ async def forecast_24h(lat: float, lon: float, tz: str = "auto") -> Dict[str, An
         "temperature_unit": "celsius",
         "windspeed_unit": "kmh",   # <-- correct unit param (avoids earlier 500s)
     }
-    async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.get(OPEN_METEO_URL, params=params)
-        r.raise_for_status()
-        data = r.json()
+    
+    # Use the global HTTP client instead of creating a new one
+    client = get_http_client()
+    r = await client.get(OPEN_METEO_URL, params=params)
+    r.raise_for_status()
+    data = r.json()
 
     hr = data.get("hourly", {}) or {}
     times = (hr.get("time") or [])[:24]

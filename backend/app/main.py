@@ -9,12 +9,26 @@ from os import makedirs
 from app.schemas import AskRequest, AskResponse
 from app.services.pipeline import answer
 from app.config import settings
+from app.http import init_http, close_http
 
 app = FastAPI(
     title="KrishiMitra AI",
     version="0.1.0",
     description="RAG + tools (price, sell/wait, weather, NDVI) answering service",
 )
+
+# Add startup and shutdown events
+@app.on_event("startup")
+async def startup_event():
+    """Initialize HTTP client on startup."""
+    await init_http()
+    print("HTTP client initialized")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Close HTTP client on shutdown."""
+    await close_http()
+    print("HTTP client closed")
 
 
 # CORS (relaxed for prototype)
