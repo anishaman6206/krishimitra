@@ -4,9 +4,9 @@ import asyncio
 import datetime as dt
 from typing import Optional, Dict, Any, List
 
-import httpx
 import xml.etree.ElementTree as ET
 from app.utils.cache import cache
+from app.http import get_http_client
 
 from statistics import median
 import datetime as _dt
@@ -90,10 +90,12 @@ async def _fetch_xml_records(commodity: str, limit: int = 200, offset: int = 0) 
         "filters[commodity]": commodity,
     }
     headers = {"User-Agent": USER_AGENT, "Accept": "application/xml"}
-    async with httpx.AsyncClient(timeout=30, headers=headers) as client:
-        r = await client.get(url, params=params)
-        r.raise_for_status()
-        root = ET.fromstring(r.text)
+    
+    # Use the global HTTP client
+    client = get_http_client()
+    r = await client.get(url, params=params, headers=headers)
+    r.raise_for_status()
+    root = ET.fromstring(r.text)
 
     recs_el = root.find("records")
     out: List[Dict[str, Any]] = []
