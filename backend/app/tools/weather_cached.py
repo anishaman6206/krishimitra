@@ -2,7 +2,7 @@
 import datetime as dt
 from time import perf_counter
 from typing import Dict, Any
-from app.cache import get_json, set_json
+from app.utils.cache import get_json, set_json
 from .weather import forecast_24h as _wx
 
 def t(): return perf_counter()

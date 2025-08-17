@@ -2,7 +2,7 @@ import time
 import datetime as dt
 from zoneinfo import ZoneInfo  # Python 3.9+ built-in timezone support
 from typing import Any, Dict, Optional
-from app.cache import get_json, set_json
+from app.utils.cache import get_json, set_json
 from .mandi import latest_price as _latest_price
 from .pricing import advise_sell_or_wait as _sell_or_wait
 

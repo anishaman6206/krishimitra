@@ -8,7 +8,7 @@ from app.schemas import AskRequest, AskResponse
 from app.services.pipeline import answer
 from app.config import settings
 from app.http import init_http, close_http
-from app.cache import init_cache
+from app.utils.cache import init_cache
 
 # Single FastAPI instance
 app = FastAPI()

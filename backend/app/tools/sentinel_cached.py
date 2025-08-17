@@ -1,7 +1,7 @@
 # app/tools/sentinel_cached.py
 import time
 from typing import Optional, Dict, Any
-from app.cache import get_json, set_json, get_bytes, set_bytes
+from app.utils.cache import get_json, set_json, get_bytes, set_bytes
 from app.tools.sentinel import ndvi_snapshot, ndvi_quicklook
 
 def t(): return time.perf_counter()
