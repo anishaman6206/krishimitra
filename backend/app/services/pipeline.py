@@ -1,4 +1,5 @@
 import asyncio
+import time
 from typing import List, Dict, Any, Optional
 
 from app.schemas import AskRequest, AskResponse, Source
@@ -8,90 +9,104 @@ from app.rag.generate import synthesize
 from app.tools.mandi import latest_price
 from app.tools.pricing import advise_sell_or_wait
 from app.tools.weather import forecast_24h as wx_forecast
-from app.tools.sentinel import sentinel_summary  
-#from app.tools.sentinel import ndvi_snapshot, ndvi_quicklook
+from app.tools.sentinel import sentinel_summary
 from app.config import settings
-from pathlib import Path
 
+# ------------ timing helper ------------
+def t() -> float:
+    return time.perf_counter()
 
+# ------------ fan-out helpers ------------
 
-# ---------- fan-out helpers ----------
-
-async def _run_rag(query_en: str, k: int = 3):
+async def _run_rag(query_en: str, k: int = 4):
+    t0 = t()
     # retrieve() is sync; run in a thread for true parallelism
-    return await asyncio.to_thread(lambda: retrieve(query_en, k=k))
+    result = await asyncio.to_thread(lambda: retrieve(query_en, k=k))
+    print(f"⏱️  RAG retrieve: {round((t() - t0) * 1000)}ms")
+    return result
 
 async def _run_price(req: AskRequest):
-    return await latest_price(
+    t0 = t()
+    result = await latest_price(
         req.crop or settings.DEFAULT_CROP,
-        district=req.district, state=req.state, market=req.market,
-        variety=req.variety, grade=req.grade, debug=req.debug
+        district=req.district,
+        state=req.state,
+        market=req.market,
+        variety=req.variety,
+        grade=req.grade,
+        debug=req.debug,
     )
+    print(f"⏱️  Price lookup: {round((t() - t0) * 1000)}ms")
+    return result
 
-async def _run_sell_wait(req: AskRequest):
-    return await advise_sell_or_wait(
+async def _run_sell_wait(req: AskRequest, price_ctx: Optional[Dict[str, Any]] = None, horizon_days: Optional[int] = None):
+    t0 = t()
+    result = await advise_sell_or_wait(
         commodity=req.crop or settings.DEFAULT_CROP,
         state=req.state, district=req.district, market=req.market,
         variety=req.variety, grade=req.grade,
-        horizon_days=req.horizon_days or settings.SELLWAIT_DEFAULT_HORIZON_DAYS,
+        horizon_days=horizon_days or (req.horizon_days or settings.SELLWAIT_DEFAULT_HORIZON_DAYS),
         qty_qtl=req.qty_qtl,
-        debug=req.debug
+        debug=req.debug,
+        price_context=price_ctx
     )
+    print(f"⏱️  Pricing analysis: {round((t() - t0) * 1000)}ms")
+    return result
 
 async def _run_weather(req: AskRequest):
+    t0 = t()
     g = req.geo or {}
     if not g or g.lat is None or g.lon is None:
         raise ValueError("weather: missing lat/lon")
-    return await wx_forecast(g.lat, g.lon, tz="auto")
-
-
+    result = await wx_forecast(g.lat, g.lon, tz="auto")
+    print(f"⏱️  Weather forecast: {round((t() - t0) * 1000)}ms")
+    return result
 
 async def _run_veg(req: AskRequest):
     g = req.geo or {}
     if not g or g.lat is None or g.lon is None:
         raise ValueError("veg: missing lat/lon")
 
-    # Read start/max from settings (defaults: start 0.5 km, max 3 km)
+    # Auto-grow AOI: start → max (meters)
     start_km = getattr(settings, "SENTINEL_START_AOI_KM", 0.5)
     max_km   = getattr(settings, "SENTINEL_MAX_AOI_KM", 3.0)
+    start_m  = int(start_km * 1000)
+    max_m    = int(max_km * 1000)
 
-    start_m = int(start_km * 1000)
-    max_m   = int(max_km * 1000)
-
-    # Build ordered AOI steps, starting from your chosen start_m and growing up to max_m
     canonical = [200, 500, 1000, 2000, 3000]
     steps = [start_m] + [s for s in canonical if s >= start_m and s <= max_m]
     steps = tuple(dict.fromkeys(steps))  # de-dupe, keep order
 
-    return await sentinel_summary(
+    t0 = t()
+    result = await sentinel_summary(
         lat=g.lat,
         lon=g.lon,
-        farm_size_meters=start_m,                 # starting AOI
-        recent_days=getattr(settings, "SENTINEL_RECENT_DAYS", 20),
+        farm_size_meters=start_m,
+        recent_days=getattr(settings, "SENTINEL_RECENT_DAYS", 45),
         resolution=10,
-        autogrow=True,                            # ← important
-        aoi_steps_m=steps                         # ← seed auto-grow path
+        autogrow=True,
+        aoi_steps_m=steps
     )
+    print(f"⏱️  NDVI/NDMI/NDWI/LAI analysis: {round((t() - t0) * 1000)}ms")
+    return result
 
-
-# ---------- summarization for tool notes ----------
+# ------------ summarization helpers ------------
 
 def _fmt_weather(wx: Dict[str, Any], days_head: int = 3) -> str:
     if not isinstance(wx, dict):
         return "WEATHER: unavailable"
 
-    r = wx.get("total_rain_next_24h_mm", 0)
-    t = wx.get("max_temp_next_24h_c")
-
+    r = float(wx.get("total_rain_next_24h_mm", 0) or 0.0)
+    tmax = wx.get("max_temp_next_24h_c")
     if "max_wind_next_24h_kmh" in wx and isinstance(wx["max_wind_next_24h_kmh"], (int, float)):
         w_kmh = float(wx["max_wind_next_24h_kmh"])
     elif "max_wind_next_24h_ms" in wx and isinstance(wx["max_wind_next_24h_ms"], (int, float)):
         w_kmh = float(wx["max_wind_next_24h_ms"]) * 3.6
     else:
         w_kmh = None
-
     wtxt = f"{w_kmh:.0f} km/h" if isinstance(w_kmh, float) else "—"
-    line = f"WEATHER 24h: rain≈{r:.0f} mm, max temp {t if t is not None else '—'}°C, max wind {wtxt}."
+
+    line = f"WEATHER 24h: rain≈{r:.0f} mm, max temp {tmax if tmax is not None else '—'}°C, max wind {wtxt}."
 
     daily = wx.get("daily") or []
     if isinstance(daily, list) and daily:
@@ -113,10 +128,9 @@ def _fmt_veg(veg: dict) -> str:
     aoi_m = (veg or {}).get("aoi_m")
     bits = []
     if lines: bits.append("; ".join(lines[:3]))
-    if "ndvi" in cov: bits.append(f"NDVI cov {cov['ndvi']}%")
+    if isinstance(cov, dict) and "ndvi" in cov: bits.append(f"NDVI cov {cov['ndvi']}%")
     if aoi_m: bits.append(f"AOI {aoi_m}m")
     return "FIELD: " + ("; ".join(bits) if bits else "data unavailable")
-
 
 def _summarize_tools(results: Dict[str, Any], horizon_days: int) -> str:
     lines: List[str] = []
@@ -140,23 +154,15 @@ def _summarize_tools(results: Dict[str, Any], horizon_days: int) -> str:
 
     def _fmt_inr(x):
         return "—" if x is None else f"₹{int(round(float(x)))}"
-    
+
     def _trend_word(slope: float | None) -> str:
         if slope is None: return "trend: n/a"
         if slope > 1:     return "trend: rising"
         if slope < -1:    return "trend: falling"
         return "trend: flat"
-    
-    def _chance_word(p: float | None) -> str:
-        if p is None: return "—"
-        return f"{int(round(100*float(p)))}%"
-    
-    # put this near the other small helpers in pipeline.py
+
+    # Use last day in forecast triplet (expected, low, high)
     def _last_forecast_triplet(sw: dict):
-        """
-        Return (expected, low, high) from the LAST day of the forecast list.
-        Prefers *_adj keys; falls back to non-adjusted; finally to top-level fields.
-        """
         fc = sw.get("forecast") or []
         if isinstance(fc, list) and fc:
             last = fc[-1]
@@ -164,124 +170,154 @@ def _summarize_tools(results: Dict[str, Any], horizon_days: int) -> str:
             low  = last.get("p20_adj", last.get("p20"))
             high = last.get("p80_adj", last.get("p80"))
             return exp, low, high
-        # fallback if no per-day forecast
         return sw.get("expected_p50_h"), sw.get("band_p20_h"), sw.get("band_p80_h")
 
-   
+    # field (sentinel)
     veg = results.get("veg")
     if veg is not None:
         lines.append(_fmt_veg(veg))
 
-
- 
-# ---- SELL/WAIT summaries in plain language (no p50/p80 terms) ----
+    # SELL/WAIT – plain language (no p50/p80 terms)
     sw = results.get("sell_wait")
     if isinstance(sw, dict) and sw.get("decision"):
         H = horizon_days or settings.SELLWAIT_DEFAULT_HORIZON_DAYS
         span = "WEEK 1" if H == 7 else ("WEEK 2" if H == 14 else f"{H}-DAY")
         notes = sw.get("notes") or {}
-        exp, low, high = _last_forecast_triplet(sw)  # <-- use last day of forecast
+        exp, low, high = _last_forecast_triplet(sw)
         line = (
             f"{span}: {'WAIT' if sw['decision']=='WAIT' else 'SELL NOW'} | "
-            f"today {_fmt_inr(sw.get('now_price'))}, "
-            f"expected {_fmt_inr(exp)}, "
-            #f"likely range {_fmt_inr(low)}–{_fmt_inr(high)}; "
+            f"today {_fmt_inr(sw.get('now_price'))}, expected {_fmt_inr(exp)}, "
             f"{_trend_word(notes.get('trend_slope_inr_per_day'))}."
-            # f" chance of better price ≈ {_chance_word(notes.get('prob_up'))}; "
-            # f" confidence {sw.get('confidence','—')}."
         )
         lines.append(line)
         if isinstance(sw.get("chart"), dict) and sw["chart"].get("url"):
             lines.append(f"FORECAST_IMG: {sw['chart']['url']}")
     elif isinstance(sw, dict) and sw.get("error"):
         lines.append(f"SELL/WAIT: error={sw['error']}")
-    
-    # Optional second horizon (WEEK 2)
-    sw14 = results.get("sell_wait_14")
-    if isinstance(sw14, dict) and sw14.get("decision"):
-        notes14 = sw14.get("notes") or {}
-        exp14, low14, high14 = _last_forecast_triplet(sw14)  # <-- use last day of 14d forecast
-        line14 = (
-            f"WEEK 2: {'WAIT' if sw14['decision']=='WAIT' else 'SELL NOW'} | "
-            f"today {_fmt_inr(sw14.get('now_price'))}, "
-            f"expected {_fmt_inr(exp14)}, "
-            #f"likely range {_fmt_inr(low14)}–{_fmt_inr(high14)}; "
-            f"{_trend_word(notes14.get('trend_slope_inr_per_day'))}."
-        )
-        lines.append(line14)
-        if isinstance(sw14.get("chart"), dict) and sw14["chart"].get("url"):
-            lines.append(f"FORECAST_IMG_14D: {sw14['chart']['url']}")
-    elif isinstance(sw14, dict) and sw14.get("error"):
-        lines.append(f"SELL/WAIT_14D: error={sw14['error']}")    
-   
-# weather
+
+    if settings.SELLWAIT_INCLUDE_2WEEK:
+        sw14 = results.get("sell_wait_14")
+        if isinstance(sw14, dict) and sw14.get("decision"):
+            notes14 = sw14.get("notes") or {}
+            exp14, low14, high14 = _last_forecast_triplet(sw14)
+            line14 = (
+                f"WEEK 2: {'WAIT' if sw14['decision']=='WAIT' else 'SELL NOW'} | "
+                f"today {_fmt_inr(sw14.get('now_price'))}, expected {_fmt_inr(exp14)}, "
+                f"{_trend_word(notes14.get('trend_slope_inr_per_day'))}."
+            )
+            lines.append(line14)
+            if isinstance(sw14.get("chart"), dict) and sw14["chart"].get("url"):
+                lines.append(f"FORECAST_IMG_14D: {sw14['chart']['url']}")
+        elif isinstance(sw14, dict) and sw14.get("error"):
+            lines.append(f"SELL/WAIT_14D: error={sw14['error']}")
+
+    # weather
     wx = results.get("weather")
     if isinstance(wx, dict) and ("total_rain_next_24h_mm" in wx or "daily" in wx):
-        lines.append(_fmt_weather(wx, days_head=settings.WX_SUMMARY_DAYS))
+        lines.append(_fmt_weather(wx, days_head=getattr(settings, "WX_SUMMARY_DAYS", 3)))
     elif isinstance(wx, dict) and wx.get("error"):
         lines.append(f"WEATHER: error={wx['error']}")
-
 
     # rag
     rag_hits = results.get("rag") or []
     lines.append(f"RAG_TOPK: {len(rag_hits)} passages retrieved.")
-
     return "\n".join(lines)
 
+# ------------ main entry ------------
 
-
-# ---------- main entry ----------
 async def answer(req: AskRequest) -> AskResponse:
-    # 1) Language handling
+    # 1) Language
     in_lang = req.lang or detect_lang(req.text)
     text_en = req.text if in_lang == "en" else translate_to_en(req.text)
 
-    # 2) Fan out (schedule ONCE)
-    tasks: Dict[str, asyncio.Future] = {}
+    # 2) Kick off tasks
+    results: Dict[str, Any] = {}
+    timings: Dict[str, int] = {}
+
+    tasks: Dict[str, asyncio.Task] = {}
+    rag_start = t()
     tasks["rag"] = asyncio.create_task(_run_rag(text_en, k=settings.RAG_TOPK))
 
-    # Only run market tools if we have at least some crop/geo hint
-    if req.crop or req.state or req.district or req.market:
-        tasks["price"] = asyncio.create_task(_run_price(req))
-        # primary SELL/WAIT at requested horizon
-        tasks["sell_wait"] = asyncio.create_task(_run_sell_wait(req))
-        # optional 2-week SELL/WAIT as a second view
-        if settings.SELLWAIT_INCLUDE_2WEEK:
-            tasks["sell_wait_14"] = asyncio.create_task(
-                advise_sell_or_wait(
-                    commodity=req.crop or settings.DEFAULT_CROP,
-                    state=req.state, district=req.district, market=req.market,
-                    variety=req.variety, grade=req.grade,
-                    horizon_days=14, qty_qtl=req.qty_qtl, debug=req.debug
-                )
-            )
-    # Weather & Satellite only if geo present
+    # Weather & Sentinel only if geo present
+    weather_start = veg_start = None
     if req.geo and req.geo.lat is not None and req.geo.lon is not None:
+        weather_start = t()
         tasks["weather"] = asyncio.create_task(_run_weather(req))
+        veg_start = t()
         tasks["veg"] = asyncio.create_task(_run_veg(req))
 
-    # 3) Gather results robustly
-    results: Dict[str, Any] = {}
-    for name, fut in tasks.items():
+    # Price and dependent SELL/WAIT (await price first)
+    if req.crop or req.state or req.district or req.market:
+        price_start = t()
         try:
-            results[name] = await fut
+            price_res = await _run_price(req)
+            results["price"] = price_res
         except Exception as e:
-            results[name] = {"error": str(e)}
+            results["price"] = {"error": str(e)}
+            price_res = None
+        timings["price"] = round((t() - price_start) * 1000)
 
-    
-    # 4) Build tool summary to guide the LLM
+        # Only start sell/wait if price returned
+        if isinstance(price_res, dict) and price_res.get("modal_price_inr_per_qtl") is not None:
+            sw_start = t()
+            tasks["sell_wait"] = asyncio.create_task(_run_sell_wait(req, price_ctx=price_res, horizon_days=7))
+            if settings.SELLWAIT_INCLUDE_2WEEK:
+                sw14_start = t()
+                tasks["sell_wait_14"] = asyncio.create_task(_run_sell_wait(req, price_ctx=price_res, horizon_days=14))
+                timings["_sell14_start_ms"] = round((t() - sw14_start) * 1000)
+            timings["_sell_start_ms"] = round((t() - sw_start) * 1000)
+
+    # 3) Await remaining tasks robustly
+    if "rag" in tasks:
+        try:
+            results["rag"] = await tasks["rag"]
+        except Exception as e:
+            results["rag"] = {"error": str(e)}
+        timings["rag"] = round((t() - rag_start) * 1000)
+
+    if "weather" in tasks and weather_start is not None:
+        try:
+            results["weather"] = await tasks["weather"]
+        except Exception as e:
+            results["weather"] = {"error": str(e)}
+        timings["weather"] = round((t() - weather_start) * 1000)
+
+    if "veg" in tasks and veg_start is not None:
+        try:
+            results["veg"] = await tasks["veg"]
+        except Exception as e:
+            results["veg"] = {"error": str(e)}
+        timings["veg"] = round((t() - veg_start) * 1000)
+
+    if "sell_wait" in tasks:
+        sw_done_start = t()
+        try:
+            results["sell_wait"] = await tasks["sell_wait"]
+        except Exception as e:
+            results["sell_wait"] = {"error": str(e)}
+        timings["sell_wait"] = round((t() - sw_done_start) * 1000)
+
+    if "sell_wait_14" in tasks:
+        sw14_done_start = t()
+        try:
+            results["sell_wait_14"] = await tasks["sell_wait_14"]
+        except Exception as e:
+            results["sell_wait_14"] = {"error": str(e)}
+        timings["sell_wait_14"] = round((t() - sw14_done_start) * 1000)
+
+    results["_timings"] = timings
+
+    # 4) Tool summary + tiny structured facts (for the LLM)
     horizon = req.horizon_days or settings.SELLWAIT_DEFAULT_HORIZON_DAYS
 
-    # 3.5) Build structured facts from tool outputs (keep it tiny & generic)
-    import json
-    
     def _safe_get(d, *keys, default=None):
         cur = d or {}
         for k in keys:
             if not isinstance(cur, dict): return default
             cur = cur.get(k)
         return cur if cur is not None else default
-    
+
+    veg = results.get("veg") or {}
     facts = {
         "price": {
             "commodity": _safe_get(results, "price", "commodity"),
@@ -297,7 +333,6 @@ async def answer(req: AskRequest) -> AskResponse:
             "low": _safe_get(results, "sell_wait", "band_p20_h"),
             "high": _safe_get(results, "sell_wait", "band_p80_h"),
             "trend_inr_per_day": _safe_get(results, "sell_wait", "notes", "trend_slope_inr_per_day"),
-            "chance_up": _safe_get(results, "sell_wait", "notes", "prob_up"),
             "decision": _safe_get(results, "sell_wait", "decision"),
             "confidence": _safe_get(results, "sell_wait", "confidence"),
         },
@@ -306,7 +341,6 @@ async def answer(req: AskRequest) -> AskResponse:
             "low": _safe_get(results, "sell_wait_14", "band_p20_h"),
             "high": _safe_get(results, "sell_wait_14", "band_p80_h"),
             "trend_inr_per_day": _safe_get(results, "sell_wait_14", "notes", "trend_slope_inr_per_day"),
-            "chance_up": _safe_get(results, "sell_wait_14", "notes", "prob_up"),
             "decision": _safe_get(results, "sell_wait_14", "decision"),
             "confidence": _safe_get(results, "sell_wait_14", "confidence"),
         },
@@ -318,79 +352,52 @@ async def answer(req: AskRequest) -> AskResponse:
         "weather_next7": {
             "daily": _safe_get(results, "weather", "daily"),
         },
-        "ndvi": {
-            "mean": _safe_get(results, "ndvi", "ndvi_latest"),
-            "prev": _safe_get(results, "ndvi", "ndvi_prev"),
-            "trend": _safe_get(results, "ndvi", "trend"),
-            "coverage_pct": _safe_get(results, "ndvi", "ndvi_coverage_pct"),
-            "aoi_km": _safe_get(results, "ndvi", "aoi_used"),
+        "veg_indices": {
+            "means": {
+                "ndvi": veg.get("ndvi_mean"),
+                "ndmi": veg.get("ndmi_mean"),
+                "ndwi": veg.get("ndwi_mean"),
+                "lai":  veg.get("lai_mean"),
+            },
+            "advice": veg.get("advice") or {},
+            "coverage_pct": veg.get("coverage_pct") or {},
+            "aoi_m": veg.get("aoi_m"),
+            "window_days": veg.get("window_days"),
         },
         "geo": {
             "lat": _safe_get(results, "weather", "lat") or (req.geo.lat if req.geo else None),
             "lon": _safe_get(results, "weather", "lon") or (req.geo.lon if req.geo else None),
         },
-        "horizon_days": req.horizon_days or settings.SELLWAIT_DEFAULT_HORIZON_DAYS,
+        "horizon_days": horizon,
         "language_hint": req.lang or "en"
     }
 
-    veg = results.get("veg") or {}
-    facts["veg_indices"] = {
-        "means": {
-            "ndvi": veg.get("ndvi_mean"),
-            "ndmi": veg.get("ndmi_mean"),
-            "ndwi": veg.get("ndwi_mean"),
-            "lai":  veg.get("lai_mean"),
-        },
-        "advice": veg.get("advice") or {},
-        "coverage_pct": veg.get("coverage_pct") or {},
-        "aoi_m": veg.get("aoi_m"),
-        "window_days": veg.get("window_days"),
-    }
-
-    facts["veg_indices"] = {
-        "means": {
-            "ndvi": veg.get("ndvi_mean"),
-            "ndmi": veg.get("ndmi_mean"),
-            "ndwi": veg.get("ndwi_mean"),
-            "lai":  veg.get("lai_mean"),
-        },
-        "advice": veg.get("advice") or {},
-        "coverage_pct": veg.get("coverage_pct") or {},
-        "aoi_m": veg.get("aoi_m"),
-        "window_days": veg.get("window_days"),
-    }
-
-    facts_json = json.dumps(facts, ensure_ascii=False)
-
-    MAX_CHARS = 6000
+    import json
     tool_summary = _summarize_tools(results, horizon_days=horizon)
+    facts_json = json.dumps(facts, ensure_ascii=False)
     tool_summary = f"{tool_summary}\n\nFACTS_JSON:\n{facts_json}"
+
+    # cap length for LLM prompt
+    MAX_CHARS = 6000
     if len(tool_summary) > MAX_CHARS:
         tool_summary = tool_summary[:MAX_CHARS] + " …"
 
-
     # 5) Synthesize final answer from RAG + tool summary
     rag_topk = results.get("rag") or []
+    ts = t()
     synth = synthesize(text_en, rag_topk, tool_notes=tool_summary)
+    results["_timings"]["synthesize_ms"] = round((t() - ts) * 1000)
     ans_en = synth["answer"]
     sources = [Source(**s) for s in synth.get("sources", [])]
 
     # 6) Translate back if needed
     final_text = ans_en if in_lang == "en" else translate_from_en(ans_en, in_lang)
 
-    # 7) Follow-ups
-    followups = [
-        "Ask this in my language",
-        "Compare another market or crop",
-        "Change holding period",
-        "Share my location for local weather/NDVI" if not (req.geo and req.geo.lat is not None) else "See field-wise NDVI history",
-    ]
-
     return AskResponse(
         answer=final_text,
-        sources=sources,
-        tool_notes=results,   # raw tool outputs for debugging/telemetry
-        follow_ups=followups,
+        sources=sources,            # kept for UI/telemetry; generate.py avoids citing in the text
+        tool_notes=results,
         lang=in_lang,
+        timings=results.get("_timings", {}),
+        debug_info=results if req.debug else None
     )
-

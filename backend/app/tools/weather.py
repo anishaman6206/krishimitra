@@ -1,10 +1,14 @@
 # backend/app/tools/weather.py
-import httpx
+import time
 from typing import Dict, Any, List
+from app.http import get_http_client
+
+def t(): return time.perf_counter()
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
 async def forecast_24h(lat: float, lon: float, tz: str = "auto") -> Dict[str, Any]:
+    start = t()
     """
     Hourly next-24h + compact 7-day daily highs/lows (no API key).
     """
@@ -20,10 +24,15 @@ async def forecast_24h(lat: float, lon: float, tz: str = "auto") -> Dict[str, An
         "temperature_unit": "celsius",
         "windspeed_unit": "kmh",   # <-- correct unit param (avoids earlier 500s)
     }
-    async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.get(OPEN_METEO_URL, params=params)
-        r.raise_for_status()
-        data = r.json()
+    
+    # Use the global HTTP client instead of creating a new one
+    api_start = t()
+    client = get_http_client()
+    r = await client.get(OPEN_METEO_URL, params=params)
+    r.raise_for_status()
+    api_ms = round((t() - api_start) * 1000)
+    
+    data = r.json()
 
     hr = data.get("hourly", {}) or {}
     times = (hr.get("time") or [])[:24]
@@ -54,6 +63,9 @@ async def forecast_24h(lat: float, lon: float, tz: str = "auto") -> Dict[str, An
             "rain_chance_pct": None if i >= len(prob) or prob[i] is None else float(prob[i]),
             "wind_kmh_max": None if i >= len(wmax) or wmax[i] is None else float(wmax[i]),
         })
+
+    total_ms = round((t() - start) * 1000)
+    print(f"⏱️  Weather forecast: {total_ms}ms (API: {api_ms}ms)")
 
     return {
         "lat": lat,
