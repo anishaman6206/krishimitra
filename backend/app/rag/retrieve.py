@@ -1,7 +1,7 @@
 from typing import List, Dict, Any
 from app.rag.index import build_or_load_index
 
-def retrieve(query: str, k: int = 4) -> List[Dict[str, Any]]:
+def retrieve(query: str, k: int = 3) -> List[Dict[str, Any]]:
     db = build_or_load_index(rebuild=False)
     results = db.similarity_search_with_relevance_scores(query, k=k)
     out: List[Dict[str, Any]] = []
