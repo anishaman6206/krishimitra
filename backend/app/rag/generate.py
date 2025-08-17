@@ -12,9 +12,12 @@ def _compact_context(passages: List[Dict[str, Any]]) -> str:
         chunks.append(f"[{i}] {txt}")
     return "\n\n".join(chunks) if chunks else "—"
 
+
+
 def _extract_week_bullets(tool_notes: str) -> str:
     if not tool_notes:
         return ""
+    tool_notes = tool_notes[:6000] + " …"
     bullets = []
     for ln in tool_notes.splitlines():
         t = ln.strip()
@@ -30,20 +33,24 @@ def synthesize(question: str, topk: List[Dict[str, Any]], tool_notes: str = "") 
 
     system = (
         "You are KrishiMitra, a practical farm advisor for India. "
-        "Decide using the numeric facts provided. Keep answers short, simple, and useful. "
-        "Avoid technical jargon (no quantiles, p50/p80, embeddings). "
-        "If some facts are missing, be upfront and give a cautious, practical next step."
+        "Use ONLY the provided context and tool notes. "
+        "If a tool note is unrelated to the user's question, IGNORE it. "
+        "Decide using numeric facts first. Keep answers short and practical. "
+        "Avoid technical jargon (no p50/p80). Do NOT include sources in the answer."
     )
-
+    
     user = (
         f"Question:\n{question}\n\n"
-        f"Context (may help for agronomy/policy guidance):\n{context_block}\n\n"
+        f"Context passages:\n{context_block}\n\n"
+        "Relevance rules:\n"
+        "- Use price/forecast notes only for market/sell/wait/rate queries.\n"
+        "- Use NDVI/NDMI/NDWI/LAI only for crop condition/irrigation/stress queries.\n"
+        "- Use weather only for weather/irrigation timing/heat-cold-rain risk.\n\n"
         f"{tool_notes or '—'}\n\n"
         "TASK:\n"
-        "- Read the FACTS_JSON (if present) and use those numbers first to make a decision.\n"
-        "- Start with one clear recommendation (e.g., 'Sell now…', 'Wait one week…', 'Irrigate lightly tomorrow…').\n"
-        "- If WEEK 1 / WEEK 2 lines are present, list them as simple bullets under 'Forecast'.\n"
-        "- Keep it farmer-friendly. 3–8 short sentences plus the bullets.\n"
+        "- Start with one clear recommendation.\n"
+        
+        "- Keep it farmer-friendly. 3–6 short sentences plus bullets.\n"
         "- Do not include citations or source names."
     )
 

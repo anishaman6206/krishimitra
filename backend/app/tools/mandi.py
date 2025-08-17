@@ -126,28 +126,32 @@ async def _fetch_recent_records(commodity: str, pages: int = 5, page_size: int =
     return all_recs
 
 def _pick_best(
-    records: List[Dict[str, Any]],
+    records: list[dict],
     state: Optional[str],
     district: Optional[str],
     market: Optional[str],
     variety: Optional[str],
-    grade: Optional[str]
-) -> Optional[Dict[str, Any]]:
-    """
-    From a list of records, find the best match based on location and other attributes.
-    This performs client-side filtering.
-    """
+    grade: Optional[str],
+    strict_state: bool = True,  # <— new
+) -> Optional[dict]:
     rows = [_normalize_item(r) for r in records if _to_int(r.get("modal_price")) is not None]
     rows.sort(key=lambda r: r.get("arrival_date", ""), reverse=True)
 
-    # Define tiers of matching, from most specific to least specific
+    # restrict to same state if requested
+    if strict_state and state:
+        rows = [r for r in rows if _ci_eq(r["state"], state)]
+        if not rows:
+            return None
+
     tiers = [
         lambda r: _ci_eq(r["state"], state) and _ci_eq(r["district"], district) and _ci_eq(r["market"], market) and _ci_eq(r["variety"], variety),
         lambda r: _ci_eq(r["state"], state) and _ci_eq(r["district"], district) and _ci_eq(r["market"], market),
         lambda r: _ci_eq(r["state"], state) and _ci_eq(r["district"], district),
         lambda r: _ci_eq(r["state"], state),
-        lambda r: True,
     ]
+    # only allow nationwide fallback when strict_state is False or no state was provided
+    if not strict_state or not state:
+        tiers.append(lambda r: True)
 
     for tier in tiers:
         for row in rows:
@@ -163,7 +167,8 @@ async def latest_price(
     variety: Optional[str] = None,
     grade: Optional[str] = None,
     cache_ttl_ok: bool = True,
-    debug: bool = False
+    debug: bool = False,
+    strict_state: bool = True,   # <— new default
 ) -> Dict[str, Any]:
     """
     Returns the freshest price data by fetching a broad list of records for a commodity
@@ -178,15 +183,22 @@ async def latest_price(
     # Fetch a broad set of records, relying on client-side filtering
     recs = await _fetch_recent_records(commodity, pages=5, page_size=200)
     if debug: print(f"[DEBUG] Fetched {len(recs)} total records for commodity='{commodity}' for local filtering.")
-
-    best = _pick_best(recs, state, district, market, variety, grade)
+    
+    
+    # ...fetch recs...
+    best = _pick_best(recs, state, district, market, variety, grade, strict_state=strict_state)
     if not best:
+        if state and strict_state:
+            raise ValueError(
+                f"No recent Agmarknet data for commodity='{commodity}' in state='{state}'. "
+                "Try a different nearby market or relax state restriction."
+            )
         raise ValueError(
             f"No recent Agmarknet data found for commodity='{commodity}' in the specified area after local filtering."
         )
-    
     cache.set(key, best)
     return best
+
 
 
 # --- add price_series ---
