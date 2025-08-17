@@ -2,6 +2,7 @@
 import os
 import json
 import logging
+import hashlib
 from typing import Any, Dict, Optional, Tuple, List
 
 import httpx
@@ -30,7 +31,8 @@ from telegram.ext import (
 # --------------------
 load_dotenv()
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
+# Accept either BACKEND_URL or BACKEND_BASE_URL
+BACKEND_URL = os.getenv("BACKEND_URL") or os.getenv("BACKEND_BASE_URL", "http://127.0.0.1:8000")
 BOT_DEFAULT_CROP = os.getenv("BOT_DEFAULT_CROP", "Tomato")
 URL_ASK = f"{BACKEND_URL.rstrip('/')}/ask"
 URL_HEALTH = f"{BACKEND_URL.rstrip('/')}/health"
@@ -65,12 +67,10 @@ _COMMODITY_ALIASES = {
     "sugarcane": "Sugarcane", "गन्ना": "Sugarcane",
 }
 
-
 MARKET_KEYWORDS = (
     "sell", "wait", "hold", "price", "market", "mandi", "rate", "bhav", "bech",
     "kab bechna", "kab bechu", "kab bechen", "kinna milega", "kitna bhav"
 )
-
 
 def _extract_crop(text: str) -> Optional[str]:
     if not text: return None
@@ -98,12 +98,12 @@ INTENT_KEYWORDS = {
 }
 
 REQUIRED_SLOTS = {
-    "SELL":   ["crop"],             # location helps but your pricing works with crop-only (best effort)
+    "SELL":   ["crop"],             # location helps but pricing can still work best-effort
     "WEATHER":["geo"],
     "NDVI":   ["geo"],
-    "IRRIG":  ["crop", "geo"],      # minimal for a simple heuristic
-    "POLICY": [],                   # RAG only
-    "GENERIC":[]                    # falls back to RAG + whatever tools available
+    "IRRIG":  ["crop", "geo"],
+    "POLICY": [],
+    "GENERIC":[]
 }
 
 def _detect_intent(text: str) -> str:
@@ -113,6 +113,9 @@ def _detect_intent(text: str) -> str:
             return intent
     return "GENERIC"
 
+# --------------------
+# Per-user prefs in user_data
+# --------------------
 def _prefs(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Dict[str, Any]:
     ud = context.user_data
     if "prefs" not in ud:
@@ -120,6 +123,7 @@ def _prefs(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Dict[str, Any]:
             "lat": None, "lon": None,
             "last_tool_notes": {}, "last_sources": [],
             "last_crop": None, "last_state": None, "last_district": None, "last_market": None,
+            "horizon_days": 7,
             "lang": None,
             "dialog": {"intent": None, "slots": {}, "pending": None},  # slot-filling state
         }
@@ -137,14 +141,15 @@ def _mk_reply_kb() -> ReplyKeyboardMarkup:
 
 def _is_market_query(text: str) -> bool:
     t = (text or "").lower()
-    return any(k in t for k in (
-        "sell","wait","hold","price","market","mandi","rate","bhav","bech",
-        "kab bechna","kitna bhav","kinna milega"
-    ))
+    return any(k in t for k in MARKET_KEYWORDS)
 
 def _mk_inline_kb(tool_notes: dict | None, user_text: str | None = None) -> InlineKeyboardMarkup | None:
     rows = []
 
+    # # NDVI quicklook only if available from last run
+    # ql = (tool_notes or {}).get("ndvi_quicklook")
+    # if isinstance(ql, dict) and ql.get("available"):
+    #     rows.append([InlineKeyboardButton("🛰️ Open NDVI image", callback_data="NDVI")])
 
     # Price horizon buttons ONLY for market queries
     if _is_market_query(user_text or ""):
@@ -154,10 +159,7 @@ def _mk_inline_kb(tool_notes: dict | None, user_text: str | None = None) -> Inli
         ])
         rows.append([InlineKeyboardButton("⚙️ Set market", callback_data="set_market")])
 
-    # No “Sources” button anymore
     return InlineKeyboardMarkup(rows) if rows else None
-
-
 
 async def _send_action(context: ContextTypes.DEFAULT_TYPE, chat_id: int, action: ChatAction):
     try:
@@ -183,15 +185,6 @@ async def _call_ask(payload: Dict[str, Any]) -> Dict[str, Any]:
         r = await client.post(URL_ASK, json=payload)
         r.raise_for_status()
         return r.json()
-
-def _format_sources(sources: list[dict]) -> str:
-    if not sources: return "No specific sources were used."
-    lines = []
-    for s in sources:
-        title = s.get("title") or (s.get("source") or "Source")
-        page = s.get("page")
-        lines.append(f"• {title} (p.{page})" if page is not None else f"• {title}")
-    return "\n".join(lines)
 
 def _guess_lang(update: Update) -> Optional[str]:
     try: return update.effective_user.language_code
@@ -270,6 +263,7 @@ async def _proceed_with_payload(update: Update, context: ContextTypes.DEFAULT_TY
         "state": prefs.get("last_state"),
         "district": prefs.get("last_district"),
         "market": prefs.get("last_market"),
+        "horizon_days": prefs.get("horizon_days", 7),
         "geo": ({"lat": prefs["lat"], "lon": prefs["lon"]}
                 if (prefs.get("lat") is not None and prefs.get("lon") is not None) else None),
         "debug": False,
@@ -285,9 +279,10 @@ async def _proceed_with_payload(update: Update, context: ContextTypes.DEFAULT_TY
 
     tool_notes = data.get("tool_notes") or {}
     prefs["last_tool_notes"] = tool_notes
+    # keep sources around in case you later expose a Sources button
     prefs["last_sources"] = data.get("sources") or []
 
-    # If pricing actually ran, remember the resolved commodity/location
+    # Remember resolved commodity/location if pricing ran
     price_ctx = tool_notes.get("price") or tool_notes.get("sell_wait", {}).get("context")
     if isinstance(price_ctx, dict):
         prefs["last_crop"] = price_ctx.get("commodity") or crop or prefs.get("last_crop")
@@ -295,21 +290,141 @@ async def _proceed_with_payload(update: Update, context: ContextTypes.DEFAULT_TY
         if price_ctx.get("district"): prefs["last_district"] = price_ctx["district"]
         if price_ctx.get("market"):   prefs["last_market"] = price_ctx["market"]
 
-    # Send final answer (no Sources button)
+    # Final answer
     answer = data.get("answer") or "Sorry, I couldn't generate an answer."
     for chunk in _split_chunks(answer):
         await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
-    
+
     kb = _mk_inline_kb(tool_notes, user_text=update.message.text)
     if kb:
         await update.message.reply_text("—", reply_markup=kb)
 
-
+    # reset dialog
     prefs["dialog"] = {"intent": None, "slots": {}, "pending": None}
 
+# --------------------
+# Voice helpers (uses voice_utils.py as provided by your teammate)
+# --------------------
+async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Accept a Telegram voice note, run STT, call backend with detected language, and offer a TTS reply."""
+    try:
+        # show typing
+        await _send_action(context, update.effective_chat.id, ChatAction.TYPING)
+
+        from voice_utils import opus_to_wav, wav_to_opus, sarvam_stt, text_to_speech
+
+        chat_id = update.effective_chat.id
+        prefs = _prefs(context, chat_id)
+
+        file_id = update.message.voice.file_id
+        t_short = hashlib.md5(file_id.encode()).hexdigest()[:12]
+        ogg = f"voice_{chat_id}_{t_short}.ogg"
+        wav = f"voice_{chat_id}_{t_short}.wav"
+
+        file = await context.bot.get_file(file_id)
+        await file.download_to_drive(ogg)
+        await opus_to_wav(ogg, wav)
+
+        transcript, detected_lang = await sarvam_stt(wav)
+        if not transcript.strip():
+            await update.message.reply_text("Sorry, I couldn't understand the audio.")
+            return
+
+        # call backend with detected language
+        payload = {
+            "text": transcript,
+            "lang": detected_lang,
+            "crop": prefs.get("last_crop") if _is_market_query(transcript) else None,
+            "state": prefs.get("last_state"),
+            "district": prefs.get("last_district"),
+            "market": prefs.get("last_market"),
+            "horizon_days": prefs.get("horizon_days", 7),
+            "geo": ({"lat": prefs["lat"], "lon": prefs["lon"]}
+                    if (prefs.get("lat") is not None and prefs.get("lon") is not None) else None),
+        }
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(URL_ASK, json=payload)
+            r.raise_for_status()
+            data = r.json()
+
+        prefs["last_tool_notes"] = data.get("tool_notes") or {}
+        answer_text = data.get("answer") or "I couldn't form an answer."
+
+        # present a button to hear the answer
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔊 Hear this answer", callback_data=f"hear_{t_short}")]])
+        await update.message.reply_text(f"📝 {answer_text}", reply_markup=kb)
+
+        # store answer for TTS callback
+        context.user_data[f"hear_{t_short}"] = {
+            "text": answer_text,
+            "language": detected_lang,
+            "chat_id": chat_id
+        }
+
+        # cleanup local files
+        for f in (ogg, wav):
+            try:
+                if os.path.exists(f):
+                    os.remove(f)
+            except Exception:
+                pass
+
+    except Exception as e:
+        logging.exception("Voice processing error", exc_info=e)
+        await update.message.reply_text(f"Sorry, there was an error processing your voice message: {e}")
+
+async def on_hear_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generate and send TTS when user taps 'Hear this answer'."""
+    query = update.callback_query
+    await query.answer()
+    if not query.data.startswith("hear_"):
+        return
+
+    short_id = query.data[5:]
+    stash = context.user_data.get(f"hear_{short_id}")
+    if not stash:
+        await query.edit_message_text("This answer has expired. Please ask again.")
+        return
+
+    text = stash["text"]
+    language = stash["language"]
+    chat_id = stash["chat_id"]
+
+    try:
+        from voice_utils import text_to_speech, wav_to_opus
+        await query.edit_message_text(f"🔊 Generating voice reply...\n\n📝 {text}")
+
+        wav = f"reply_{chat_id}_{short_id}.wav"
+        ogg = f"reply_{chat_id}_{short_id}.ogg"
+        tts_lang = f"{language}-IN" if language and language != "en" else "en-IN"
+
+        await text_to_speech(text, wav, "default", tts_lang)
+        await wav_to_opus(wav, ogg)
+
+        with open(ogg, "rb") as vf:
+            await context.bot.send_voice(chat_id, voice=vf)
+
+        await query.edit_message_reply_markup(
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Voice sent!", callback_data="voice_sent")]])
+        )
+
+    except Exception as e:
+        await query.edit_message_text(f"Sorry, there was an error generating voice: {e}")
+    finally:
+        # cleanup
+        for f in (wav, ogg):
+            try:
+                if os.path.exists(f):
+                    os.remove(f)
+            except Exception:
+                pass
+        try:
+            del context.user_data[f"hear_{short_id}"]
+        except Exception:
+            pass
 
 # --------------------
-# Handlers
+# Command / message handlers
 # --------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefs = _prefs(context, update.effective_chat.id)
@@ -333,6 +448,10 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=_mk_reply_kb()
     )
 
+async def health(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ok = await _backend_health()
+    await update.message.reply_text("✅ Backend OK" if ok else f"❌ Backend unhealthy at {BACKEND_URL}")
+
 async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loc = update.message.location
     prefs = _prefs(context, update.effective_chat.id)
@@ -341,7 +460,7 @@ async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Location saved: {loc.latitude:.5f}, {loc.longitude:.5f}\nNow ask your question.",
                                     reply_markup=_mk_reply_kb())
 
-    # if we were waiting for geo, proceed automatically
+    # auto-continue if we were waiting for geo
     dlg = prefs.get("dialog") or {}
     if dlg.get("pending") == "geo":
         intent = dlg.get("intent") or "GENERIC"
@@ -351,6 +470,10 @@ async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_example(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await on_text(update, context, forced_text="Should I sell tomatoes now?")
 
+def _get_missing_slots_for_intent(text: str, prefs: Dict[str, Any], parsed_crop: Optional[str]) -> List[str]:
+    intent = _detect_intent(text)
+    return _get_missing_slots(intent, prefs, parsed_crop)
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE, forced_text: Optional[str] = None):
     msg = forced_text or (update.message.text or "").strip()
     if not msg: return
@@ -358,6 +481,34 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE, forced_tex
     chat_id = update.effective_chat.id
     prefs = _prefs(context, chat_id)
     prefs["lang"] = prefs.get("lang") or _guess_lang(update)
+
+    # Quick "Set market:" parser (free-form text)
+    if msg.lower().startswith("set market:"):
+        try:
+            payload = msg.split(":", 1)[1].strip()
+            parts = [p.strip() for p in payload.split(",")]
+            if len(parts) >= 1: prefs["last_state"] = parts[0] or None
+            if len(parts) >= 2: prefs["last_district"] = parts[1] or None
+            if len(parts) >= 3: prefs["last_market"] = parts[2] or None
+            await update.message.reply_text(
+                f"✅ Set market:\nState={prefs['last_state']}\nDistrict={prefs['last_district']}\nMarket={prefs['last_market']}"
+            )
+        except Exception:
+            await update.message.reply_text("Format: Set market: Karnataka, Bangalore, Ramanagara")
+        return
+
+    # Allow free “Set crop … / Set horizon …” text
+    if msg.lower().startswith("set crop"):
+        prefs["last_crop"] = _extract_crop(msg) or msg.split(" ", 2)[-1].strip().title()
+        await update.message.reply_text(f"✅ Crop set to: {prefs['last_crop']}")
+        return
+    if msg.lower().startswith("set horizon"):
+        try:
+            prefs["horizon_days"] = int(msg.split()[-1])
+            await update.message.reply_text(f"✅ Horizon set to: {prefs['horizon_days']} days")
+        except Exception:
+            await update.message.reply_text("Say: Set horizon 7  (or 14)")
+        return
 
     # If we were filling a pending slot, try to fill it now
     dlg = prefs.get("dialog") or {"intent": None, "slots": {}, "pending": None}
@@ -395,23 +546,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     prefs = _prefs(context, update.effective_chat.id)
     tool_notes = prefs.get("last_tool_notes") or {}
-    sources = prefs.get("last_sources") or []
     data = query.data or ""
-
-    if data == "SRC":
-        txt = _format_sources(sources)
-        for chunk in _split_chunks(txt):
-            await query.message.reply_text(chunk, disable_web_page_preview=True)
-        return
-
-    if data == "FU":
-        fus = tool_notes.get("follow_ups") or []
-        if not fus:
-            await query.message.reply_text("No follow-ups were suggested.")
-            return
-        txt = "Try one of these:\n" + "\n".join([f"• {f}" for f in fus[:8]])
-        await query.message.reply_text(txt)
-        return
 
     if data == "NDVI":
         ql = (tool_notes or {}).get("ndvi_quicklook")
@@ -433,13 +568,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             photo=InputFile.from_bytes(content, filename="ndvi.png"),
             caption="🛰️ NDVI quicklook"
         )
+        return
 
-async def health(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ok = await _backend_health()
-    await update.message.reply_text("✅ Backend OK" if ok else f"❌ Backend unhealthy at {BACKEND_URL}")
+    if data == "h7":
+        prefs["horizon_days"] = 7
+        await query.message.reply_text("✅ Horizon set to 7 days.")
+        return
+    if data == "h14":
+        prefs["horizon_days"] = 14
+        await query.message.reply_text("✅ Horizon set to 14 days.")
+        return
+    if data == "set_market":
+        await query.message.reply_text("Send me your market like:\nSet market: Karnataka, Bangalore, Ramanagara")
+        return
 
-async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Sorry, I didn't understand that command. Try /help.")
+async def on_hear_sent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Acknowledge "voice_sent" callback
+    await update.callback_query.answer("Voice message sent! 🎉")
 
 # --------------------
 # Main
@@ -457,11 +602,16 @@ def main():
     app.add_handler(MessageHandler(filters.LOCATION, on_location))
     app.add_handler(MessageHandler(filters.Regex("^🧾 Example:"), on_example))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_handler(MessageHandler(filters.VOICE, on_voice))
 
+    # Voice callbacks
+    app.add_handler(CallbackQueryHandler(on_hear_callback, pattern="^hear_"))
+    app.add_handler(CallbackQueryHandler(on_hear_sent, pattern="^voice_sent$"))
+
+    # Generic button callbacks (NDVI, horizons, set_market)
     app.add_handler(CallbackQueryHandler(on_callback))
-    app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-    log.info("KrishiMitra Telegram slot-filling bot started.")
+    log.info("KrishiMitra Telegram bot (slot-filling + voice) started.")
     app.run_polling(close_loop=False)
 
 if __name__ == "__main__":
