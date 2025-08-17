@@ -280,7 +280,7 @@ async def _proceed_with_payload(update: Update, context: ContextTypes.DEFAULT_TY
     tool_notes = data.get("tool_notes") or {}
     prefs["last_tool_notes"] = tool_notes
     # keep sources around in case you later expose a Sources button
-    prefs["last_sources"] = data.get("sources") or []
+    #prefs["last_sources"] = data.get("sources") or []
 
     # Remember resolved commodity/location if pricing ran
     price_ctx = tool_notes.get("price") or tool_notes.get("sell_wait", {}).get("context")
@@ -303,7 +303,7 @@ async def _proceed_with_payload(update: Update, context: ContextTypes.DEFAULT_TY
     prefs["dialog"] = {"intent": None, "slots": {}, "pending": None}
 
 # --------------------
-# Voice helpers (uses voice_utils.py as provided by your teammate)
+# Voice helpers (uses voice_utils.py)
 # --------------------
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Accept a Telegram voice note, run STT, call backend with detected language, and offer a TTS reply."""
