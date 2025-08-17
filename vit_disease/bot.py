@@ -1,9 +1,11 @@
+# bot.py
 import os
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from vit_model import predict_disease
-from krishimitra.vit_disease.llm_helper import generate_disease_info
+from llm_helper import generate_disease_info
+from twilio_helper import send_via_twilio   # 👈 import here
 
 load_dotenv()
 
@@ -24,10 +26,14 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         disease_label = predict_disease(image_path)
         cure_info = generate_disease_info(disease_label)
-        await update.message.reply_text(
-            f"🩺 **Prediction:** {disease_label}\n\n{cure_info}",
-            parse_mode="Markdown"
-        )
+        final_message = f"🩺 Prediction: {disease_label}\n\n{cure_info}"
+
+        # Reply to Telegram user
+        await update.message.reply_text(final_message, parse_mode="Markdown")
+
+        # Forward to SMS & WhatsApp
+        send_via_twilio(final_message)
+
     except Exception as e:
         await update.message.reply_text(f"Error: {str(e)}")
     finally:
