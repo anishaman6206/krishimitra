@@ -1,112 +1,182 @@
-import os, json, asyncio, datetime as dt
-from typing import Any, Optional
-from contextlib import asynccontextmanager
+# backend/app/utils/cache.py
+import time
+import threading
+import asyncio
+import datetime as dt
+from typing import Any, Optional, Iterable
 
-# Disable Redis for prototype - use in-memory only
-USE_REDIS = False  # bool(os.getenv("REDIS_URL"))
-_redis = None
-_mem: dict[str, tuple[float, Any]] = {}  # expires_at, value
+# -----------------------------
+# Core simple in-memory TTL cache (sync)
+# -----------------------------
+class SimpleTTLCache:
+    def __init__(self, default_ttl: Optional[int] = 600):
+        # _data: key -> (value, expiry_ts or None)
+        self._data: dict[str, tuple[Any, Optional[float]]] = {}
+        self._default_ttl = default_ttl
+        self._lock = threading.Lock()
 
-# Agricultural data cache TTLs (in seconds)
+    def _now(self) -> float:
+        return time.time()
+
+    def get(self, key: str, default: Any = None) -> Any:
+        now = self._now()
+        with self._lock:
+            item = self._data.get(key)
+            if not item:
+                return default
+            value, expiry = item
+            if expiry is not None and expiry <= now:
+                # expired → drop
+                self._data.pop(key, None)
+                return default
+            return value
+
+    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
+        """Set a value with optional per-key TTL."""
+        with self._lock:
+            eff_ttl = ttl if ttl is not None else self._default_ttl
+            expiry = (self._now() + eff_ttl) if eff_ttl is not None else None
+            self._data[key] = (value, expiry)
+
+    def delete(self, key: str) -> None:
+        with self._lock:
+            self._data.pop(key, None)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._data.clear()
+
+    # Helpers to support flush utilities
+    def keys(self) -> Iterable[str]:
+        with self._lock:
+            return list(self._data.keys())
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._data)
+
+    def sweep(self) -> int:
+        """Remove expired keys proactively; returns count removed."""
+        now = self._now()
+        removed = 0
+        with self._lock:
+            for k in list(self._data.keys()):
+                _, expiry = self._data[k]
+                if expiry is not None and expiry <= now:
+                    self._data.pop(k, None)
+                    removed += 1
+        return removed
+
+
+# Singleton cache instance used everywhere
+cache = SimpleTTLCache(default_ttl=600)
+
+
+# -----------------------------
+# Async convenience layer with type-specific TTLs (feature branch)
+# -----------------------------
+
+# In this prototype we do not use Redis; only in-memory.
+USE_REDIS = False
+_redis = None  # placeholder for future
+
+# Agricultural data cache TTLs (seconds)
 CACHE_TTL = {
-    "price": 86400,      # 24 hours - prices don't change frequently
-    "weather": 21600,    # 6 hours - weather forecasts update 4x daily
-    "ndvi": 604800,      # 7 days - satellite data is weekly
-    "default": 3600      # 1 hour - general cache
+    "price":   24 * 3600,   # daily
+    "weather": 6  * 3600,   # ~4x/day updates
+    "ndvi":    7  * 24 * 3600,  # weekly-ish
+    "default": 3600,
 }
 
-async def init_cache():
-    """Initialize cache - simplified for in-memory only"""
-    global _redis
-    print("💾 Cache initialized (in-memory mode for prototype)")
-    # Start background cleanup task
-    asyncio.create_task(_cleanup_expired_cache())
-
-def _now_ts() -> float: 
+def _now_ts() -> float:
     return dt.datetime.utcnow().timestamp()
 
 def _get_ttl(cache_type: str) -> int:
-    """Get appropriate TTL based on data type"""
-    return CACHE_TTL.get(cache_type, CACHE_TTL["default"])
+    return int(CACHE_TTL.get(cache_type, CACHE_TTL["default"]))
+
+async def init_cache():
+    """Init hook (kept async for symmetry with future Redis mode)."""
+    print("💾 Cache initialized (in-memory mode)")
+    # Optionally run a lightweight periodic sweeper
+    asyncio.create_task(_cleanup_task())
+
+async def _cleanup_task():
+    while True:
+        try:
+            await asyncio.sleep(3600)
+            n = cache.sweep()
+            if n:
+                print(f"🧹 Cache sweep removed {n} expired keys")
+        except Exception as e:
+            print(f"Cache sweep error: {e}")
+
+# --- JSON helpers ---
 
 async def get_json(key: str, cache_type: str = "default") -> Optional[Any]:
     try:
-        # Use in-memory cache only
-        hit = _mem.get(key)
-        if not hit: 
-            return None
-        expires_at, val = hit
-        if _now_ts() > expires_at:
-            _mem.pop(key, None)
-            return None
-        
-        # Log cache hit with type info
-        time_left = expires_at - _now_ts()
-        hours_left = int(time_left / 3600)
-        print(f"💾 {cache_type.title()} cache hit: 0ms (expires in {hours_left}h)")
+        val = cache.get(key)
+        if val is not None:
+            # simple log for visibility
+            print(f"💾 {cache_type.title()} cache hit: {key}")
         return val
     except Exception as e:
-        print(f"Cache get error for {key}: {e}")
+        print(f"Cache get_json error for {key}: {e}")
         return None
 
 async def set_json(key: str, val: Any, cache_type: str = "default"):
-    """Set cached JSON data with type-specific TTL"""
     try:
         ttl_sec = _get_ttl(cache_type)
-        expires_at = _now_ts() + ttl_sec
-        _mem[key] = (expires_at, val)
-        
-        hours = int(ttl_sec / 3600)
-        print(f"💾 {cache_type.title()} cached for {hours}h: {key[:50]}...")
+        cache.set(key, val, ttl=ttl_sec)
+        hrs = int(ttl_sec / 3600)
+        print(f"💾 {cache_type.title()} cached for {hrs}h: {key}")
     except Exception as e:
-        print(f"Cache set error for {key}: {e}")
+        print(f"Cache set_json error for {key}: {e}")
+
+# --- Bytes helpers (e.g., NDVI images) ---
 
 async def get_bytes(key: str, cache_type: str = "default") -> Optional[bytes]:
-    """Get cached binary data (for NDVI images)"""
     try:
-        # Use in-memory cache only
-        hit = _mem.get(key)
-        if not hit: 
-            return None
-        exp, val = hit
-        if _now_ts() > exp: 
-            _mem.pop(key, None)
-            return None
-        print(f"💾 {cache_type.title()} image cache hit: 0ms")
-        return val
+        val = cache.get(key)
+        if isinstance(val, (bytes, bytearray)):
+            print(f"💾 {cache_type.title()} image cache hit: {key}")
+            return bytes(val)
+        return None
     except Exception as e:
         print(f"Cache get_bytes error for {key}: {e}")
         return None
 
 async def set_bytes(key: str, val: bytes, cache_type: str = "default"):
-    """Set cached binary data with type-specific TTL"""
     try:
         ttl_sec = _get_ttl(cache_type)
-        _mem[key] = (_now_ts() + ttl_sec, val)
-        
+        cache.set(key, bytes(val), ttl=ttl_sec)
         size_mb = len(val) / (1024 * 1024)
-        hours = int(ttl_sec / 3600)
-        print(f"💾 {cache_type.title()} image cached ({size_mb:.1f}MB) for {hours}h")
+        hrs = int(ttl_sec / 3600)
+        print(f"💾 {cache_type.title()} image cached ({size_mb:.2f} MB) for {hrs}h: {key}")
     except Exception as e:
         print(f"Cache set_bytes error for {key}: {e}")
 
-async def _cleanup_expired_cache():
-    """Background task to clean up expired cache entries"""
-    while True:
-        try:
-            await asyncio.sleep(3600)  # Run every hour
-            
-            now = _now_ts()
-            expired_keys = [
-                key for key, (expires_at, _) in _mem.items() 
-                if now > expires_at
-            ]
-            
-            for key in expired_keys:
-                _mem.pop(key, None)
-            
-            if expired_keys:
-                print(f"🧹 Cleaned up {len(expired_keys)} expired cache entries")
-                
-        except Exception as e:
-            print(f"Cache cleanup error: {e}")
+
+# -----------------------------
+# Flush utilities (kept from main and generalized)
+# -----------------------------
+
+def flush_all() -> int:
+    """Clear entire cache; returns count of keys flushed."""
+    try:
+        n = len(cache)
+    except Exception:
+        n = 0
+    cache.clear()
+    return n
+
+def flush_prefix(prefix: str) -> int:
+    """Remove only keys starting with `prefix` (e.g. 'mandi:', 'weather:', 'ndvi:')."""
+    removed = 0
+    try:
+        for k in list(cache.keys()):
+            if str(k).startswith(prefix):
+                cache.delete(k)
+                removed += 1
+    except Exception:
+        pass
+    return removed

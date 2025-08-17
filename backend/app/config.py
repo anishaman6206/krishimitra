@@ -36,10 +36,14 @@ class Settings:
     SENTINEL_QUICKLOOK_RECENT_DAYS: int = int(os.getenv("SENTINEL_QUICKLOOK_RECENT_DAYS", "20"))
 
     # Sentinel/NDVI windows
-    SENTINEL_AOI_KM: float        = float(os.getenv("SENTINEL_AOI_KM", "0.5"))
-    SENTINEL_RECENT_DAYS: int     = int(os.getenv("SENTINEL_RECENT_DAYS", "10"))
+ 
     SENTINEL_PREV_DAYS: int       = int(os.getenv("SENTINEL_PREV_DAYS", "10"))
     SENTINEL_GAP_DAYS: int        = int(os.getenv("SENTINEL_GAP_DAYS", "7"))
+
+    SENTINEL_START_AOI_KM: float = 0.5    # start small
+    SENTINEL_MAX_AOI_KM: float = 3.0      # grow up to 3 km
+    SENTINEL_RECENT_DAYS: int = 20
+
 
     SELLWAIT_MIN_UPLIFT_INR: int = 15 # require at least ₹15/qtl upside to WAIT
 # or a percent version: SELLWAIT_MIN_UPLIFT_PCT = 0.01  # 1%
