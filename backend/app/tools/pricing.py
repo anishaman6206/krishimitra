@@ -3,6 +3,7 @@ import os
 import json
 import asyncio
 import datetime as dt
+import time
 from typing import Optional, Dict, Any, List
 
 
@@ -212,7 +213,8 @@ async def advise_sell_or_wait(
     grade: Optional[str] = None,
     horizon_days: int = 7,
     qty_qtl: Optional[float] = None,  # kept for signature compatibility; not used
-    debug: bool = False
+    debug: bool = False,
+    price_context: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
     Decision using ONLY:
@@ -226,13 +228,22 @@ async def advise_sell_or_wait(
       - Else WAIT, and report risk via p20_adj (downside) and p80_adj (upside).
       - Confidence heuristic from band width relative to price.
     """
-    # 1) Current-day price row
-    price_row = await latest_price(
-        commodity=commodity,
-        state=state, district=district, market=market,
-        variety=variety, grade=grade,
-        cache_ttl_ok=True, debug=debug
-    )
+    t0 = time.perf_counter()
+    
+    # 1) Current-day price row - use injected price if available
+    if price_context and isinstance(price_context, dict):
+        price_row = price_context
+        print(f"[pricing] Using provided price context (no fetch)")
+    else:
+        # FALLBACK: fetch price (prefer cached version)
+        print(f"[pricing] Fetching price (no context provided)")
+        price_row = await latest_price(
+            commodity=commodity,
+            state=state, district=district, market=market,
+            variety=variety, grade=grade,
+            cache_ttl_ok=True, debug=debug
+        )
+    
     now_price = float(price_row["modal_price_inr_per_qtl"])
     # prefer API date string if present; else today
     adate = price_row.get("arrival_date")
@@ -338,6 +349,9 @@ async def advise_sell_or_wait(
     if debug:
         print("[pricing] ids=", ids)
         print("[pricing] decision pack=", json.dumps(result, indent=2, ensure_ascii=False))
+    
+    timing_ms = round((time.perf_counter() - t0) * 1000)
+    print(f"⏱️  Pricing analysis: {timing_ms}ms")
     return result
 
 

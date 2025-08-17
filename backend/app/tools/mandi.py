@@ -2,11 +2,14 @@ import os
 import json
 import asyncio
 import datetime as dt
+import time
 from typing import Optional, Dict, Any, List
 
 import xml.etree.ElementTree as ET
-from app.utils.cache import cache
+from app.cache import get_json, set_json
 from app.http import get_http_client
+
+def t(): return time.perf_counter()
 
 from statistics import median
 import datetime as _dt
@@ -78,9 +81,27 @@ def _normalize_item(item: Dict[str, Any]) -> Dict[str, Any]:
 # -------------------------------
 # Core API Interaction (using XML for reliability)
 # -------------------------------
-async def _fetch_xml_records(commodity: str, limit: int = 200, offset: int = 0) -> List[Dict[str, Any]]:
+async def _fetch_xml_records(commodity: str, limit: int = 200, offset: int = 0, 
+                           state: Optional[str] = None, district: Optional[str] = None, 
+                           market: Optional[str] = None) -> List[Dict[str, Any]]:
     """Fetch a page of XML records for a commodity; return as list of dicts."""
     _ensure_api_key()
+    
+    # Create cache key for this specific API call
+    cache_parts = [commodity, str(limit), str(offset)]
+    if state: cache_parts.append(f"state:{state}")
+    if district: cache_parts.append(f"district:{district}")
+    if market: cache_parts.append(f"market:{market}")
+    
+    api_cache_key = f"api_call:{'|'.join(cache_parts)}"
+    
+    # Try cache first (5 minute TTL for API calls)
+    from app.cache import get_json, set_json
+    cached_result = await get_json(api_cache_key, "price")
+    if cached_result:
+        print(f"💾 API call cache hit: {len(cached_result)} records")
+        return cached_result
+    
     url = f"{API_BASE}/{RESOURCE_ID}"
     params = {
         "api-key": DATA_GOV_IN_API_KEY,
@@ -89,6 +110,15 @@ async def _fetch_xml_records(commodity: str, limit: int = 200, offset: int = 0) 
         "offset": str(offset),
         "filters[commodity]": commodity,
     }
+    
+    # Add API-level filters to reduce data fetched
+    if state:
+        params["filters[state]"] = state
+    if district:
+        params["filters[district]"] = district  
+    if market:
+        params["filters[market]"] = market
+        
     headers = {"User-Agent": USER_AGENT, "Accept": "application/xml"}
     
     # Use the global HTTP client
@@ -115,16 +145,82 @@ async def _fetch_xml_records(commodity: str, limit: int = 200, offset: int = 0) 
             "max_price": (item.findtext("max_price") or "").strip(),
             "modal_price": (item.findtext("modal_price") or "").strip(),
         })
+    
+    # Cache the API result for 5 minutes to avoid duplicate calls
+    await set_json(api_cache_key, out, "price")
+    print(f"💾 API call cached: {len(out)} records")
+    
     return out
 
-async def _fetch_recent_records(commodity: str, pages: int = 5, page_size: int = 200) -> List[Dict[str, Any]]:
-    """Fetch a few pages of data for a commodity."""
+async def _fetch_recent_records(commodity: str, pages: int = 5, page_size: int = 200,
+                              state: Optional[str] = None, district: Optional[str] = None,
+                              market: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Fetch records using progressive API filtering strategy.
+    Try specific filters first, then broaden if insufficient data.
+    """
     all_recs: List[Dict[str, Any]] = []
-    for i in range(pages):
-        recs = await _fetch_xml_records(commodity, limit=page_size, offset=i * page_size)
-        if not recs:
-            break
-        all_recs.extend(recs)
+    
+    # Progressive filtering strategies (most specific to least specific)
+    strategies = [
+        {"state": state, "district": district, "market": market, "name": "state+district+market"},
+        {"state": state, "district": district, "name": "state+district"},
+        {"state": state, "name": "state"},
+        {"name": "commodity-only"},
+    ]
+    
+    for strategy in strategies:
+        if not strategy.get("state") and strategy["name"] != "commodity-only":
+            continue  # Skip if we don't have the required filter data
+            
+        print(f"🔍 [mandi] Trying strategy: {strategy['name']}")
+        t0 = t()
+        temp_recs: List[Dict[str, Any]] = []
+        recs_total = 0
+        
+        # Try to fetch with this strategy
+        for i in range(pages):
+            try:
+                page_t = t()
+                recs = await _fetch_xml_records(
+                    commodity, 
+                    limit=page_size, 
+                    offset=i * page_size,
+                    state=strategy.get("state"),
+                    district=strategy.get("district"),
+                    market=strategy.get("market")
+                )
+                page_ms = round((t() - page_t) * 1000)
+                print(f"   page {i} {strategy['name']}: {len(recs)} recs in {page_ms}ms")
+                
+                recs_total += len(recs)
+                if not recs:
+                    break
+                temp_recs.extend(recs)
+                
+                # If we got decent amount of data, we can stop early
+                if recs_total >= 50:  # Reasonable sample size
+                    break
+                    
+            except Exception as e:
+                page_ms = round((t() - page_t) * 1000)
+                print(f"⚠️  [mandi] Strategy {strategy['name']} page {i} failed in {page_ms}ms: {e}")
+                break
+        
+        strategy_ms = round((t() - t0) * 1000)
+        print(f"✓ strategy {strategy['name']} total={recs_total} in {strategy_ms}ms")
+        
+        if temp_recs:
+            print(f"✅ [mandi] Strategy {strategy['name']} returned {len(temp_recs)} records")
+            all_recs.extend(temp_recs)
+            
+            # If we got good data from specific filters, prefer that
+            if len(temp_recs) >= 10 and strategy["name"] != "commodity-only":
+                break
+        else:
+            print(f"❌ [mandi] Strategy {strategy['name']} returned no records")
+    
+    print(f"📊 [mandi] Total records fetched: {len(all_recs)}")
     return all_recs
 
 def _pick_best(
@@ -133,7 +229,8 @@ def _pick_best(
     district: Optional[str],
     market: Optional[str],
     variety: Optional[str],
-    grade: Optional[str]
+    grade: Optional[str],
+    strict_state: bool = True,  # <— new
 ) -> Optional[Dict[str, Any]]:
     """
     From a list of records, find the best match based on location and other attributes.
@@ -142,14 +239,23 @@ def _pick_best(
     rows = [_normalize_item(r) for r in records if _to_int(r.get("modal_price")) is not None]
     rows.sort(key=lambda r: r.get("arrival_date", ""), reverse=True)
 
+    # restrict to same state if requested
+    if strict_state and state:
+        rows = [r for r in rows if _ci_eq(r["state"], state)]
+        if not rows:
+            return None
+
     # Define tiers of matching, from most specific to least specific
     tiers = [
         lambda r: _ci_eq(r["state"], state) and _ci_eq(r["district"], district) and _ci_eq(r["market"], market) and _ci_eq(r["variety"], variety),
         lambda r: _ci_eq(r["state"], state) and _ci_eq(r["district"], district) and _ci_eq(r["market"], market),
         lambda r: _ci_eq(r["state"], state) and _ci_eq(r["district"], district),
         lambda r: _ci_eq(r["state"], state),
-        lambda r: True,
     ]
+    
+    # only allow nationwide fallback when strict_state is False or no state was provided
+    if not strict_state or not state:
+        tiers.append(lambda r: True)
 
     for tier in tiers:
         for row in rows:
@@ -165,29 +271,51 @@ async def latest_price(
     variety: Optional[str] = None,
     grade: Optional[str] = None,
     cache_ttl_ok: bool = True,
-    debug: bool = False
+    debug: bool = False,
+    strict_state: bool = True,   # <— new default
 ) -> Dict[str, Any]:
     """
     Returns the freshest price data by fetching a broad list of records for a commodity
     and then filtering them locally to find the best match.
     """
+    start = t()
+    
     key = f"mandi:{commodity}:{state}:{district}:{market}:{variety}:{grade}"
     if cache_ttl_ok:
-        cached = cache.get(key)
+        cached = await get_json(key, "price")
         if cached:
+            cache_ms = round((t() - start) * 1000)
+            print(f"💾 Price cache hit: {cache_ms}ms")
             return cached
 
-    # Fetch a broad set of records, relying on client-side filtering
-    recs = await _fetch_recent_records(commodity, pages=5, page_size=200)
-    if debug: print(f"[DEBUG] Fetched {len(recs)} total records for commodity='{commodity}' for local filtering.")
+    # Fetch records using progressive API filtering
+    fetch_start = t()
+    recs = await _fetch_recent_records(commodity, pages=5, page_size=200, 
+                                     state=state, district=district, market=market)
+    fetch_ms = round((t() - fetch_start) * 1000)
+    if debug: print(f"[DEBUG] Fetched {len(recs)} total records for commodity='{commodity}' using progressive filtering.")
 
-    best = _pick_best(recs, state, district, market, variety, grade)
+    # Find best match
+    match_start = t()
+    best = _pick_best(recs, state, district, market, variety, grade, strict_state=strict_state)
+    match_ms = round((t() - match_start) * 1000)
+    
     if not best:
+        total_ms = round((t() - start) * 1000)
+        print(f"❌ Price lookup failed: {total_ms}ms")
+        if state and strict_state:
+            raise ValueError(
+                f"No recent Agmarknet data for commodity='{commodity}' in state='{state}'. "
+                "Try a different nearby market or relax state restriction."
+            )
         raise ValueError(
             f"No recent Agmarknet data found for commodity='{commodity}' in the specified area after local filtering."
         )
     
-    cache.set(key, best)
+    await set_json(key, best, "price")
+    total_ms = round((t() - start) * 1000)
+    print(f"⏱️  Price lookup: {total_ms}ms (fetch: {fetch_ms}ms, match: {match_ms}ms)")
+    
     return best
 
 
@@ -205,10 +333,11 @@ async def price_series(
     Returns a list of {date: 'YYYY-MM-DD', modal_price: int} for the last <= `days` days.
     Aggregates by daily median of matching rows.
     """
-    # pull plenty, we will trim by date afterwards
-    recs = await _fetch_recent_records(commodity, pages=5, page_size=200)
+    # pull data using progressive API filtering
+    recs = await _fetch_recent_records(commodity, pages=5, page_size=200,
+                                     state=state, district=district, market=market)
     if debug:
-        print(f"[DEBUG] series fetched raw={len(recs)} rows for commodity='{commodity}'")
+        print(f"[DEBUG] series fetched raw={len(recs)} rows for commodity='{commodity}' using progressive filtering")
 
     # normalize + (soft) filter by provided geography
     rows = []
@@ -260,6 +389,10 @@ async def _cli(
     debug: bool
 ):
     """CLI wrapper to test the latest_price function."""
+    # Initialize HTTP client for CLI usage
+    from app.http import init_http
+    await init_http()
+    
     try:
         data = await latest_price(commodity, district, state, market, variety, grade, debug=debug)
         print(json.dumps(data, indent=2, ensure_ascii=False))

@@ -1,5 +1,3 @@
-# backend/app/main.py
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -10,28 +8,28 @@ from app.schemas import AskRequest, AskResponse
 from app.services.pipeline import answer
 from app.config import settings
 from app.http import init_http, close_http
+from app.cache import init_cache
 
-app = FastAPI(
-    title="KrishiMitra AI",
-    version="0.1.0",
-    description="RAG + tools (price, sell/wait, weather, NDVI) answering service",
-)
+# Single FastAPI instance
+app = FastAPI()
 
-# Add startup and shutdown events
+# Single startup event
 @app.on_event("startup")
 async def startup_event():
-    """Initialize HTTP client on startup."""
+    """Initialize cache and HTTP client on startup."""
+    await init_cache()
     await init_http()
+    print("Cache initialized")
     print("HTTP client initialized")
 
+# Single shutdown event
 @app.on_event("shutdown")
 async def shutdown_event():
     """Close HTTP client on shutdown."""
     await close_http()
     print("HTTP client closed")
 
-
-# CORS (relaxed for prototype)
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -44,7 +42,7 @@ app.add_middleware(
 makedirs(settings.STATIC_DIR, exist_ok=True)
 app.mount("/static", StaticFiles(directory=settings.STATIC_DIR), name="static")
 
-
+# API endpoints
 @app.get("/")
 async def root():
     return {"ok": True, "service": "KrishiMitra AI", "version": app.version}

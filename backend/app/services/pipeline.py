@@ -1,16 +1,19 @@
 import asyncio
+import time
 from typing import List, Dict, Any, Optional
 
 from app.schemas import AskRequest, AskResponse, Source
 from app.tools.lang import detect_lang, translate_to_en, translate_from_en
 from app.rag.retrieve import retrieve
 from app.rag.generate import synthesize
-from app.tools.mandi import latest_price
-from app.tools.pricing import advise_sell_or_wait
-from app.tools.weather import forecast_24h as wx_forecast
-from app.tools.sentinel import ndvi_snapshot, ndvi_quicklook
+from app.tools.mandi_cached import latest_price_cached as latest_price, advise_sell_or_wait_cached as advise_sell_or_wait
+from app.tools.weather_cached import forecast_24h_cached as wx_forecast  
+from app.tools.sentinel_cached import ndvi_snapshot_cached as ndvi_snapshot, ndvi_quicklook_cached as ndvi_quicklook
 from app.config import settings
 from pathlib import Path
+
+# Timing helper
+def t(): return time.perf_counter()
 
 
 
@@ -18,31 +21,52 @@ from pathlib import Path
 # ---------- fan-out helpers ----------
 
 async def _run_rag(query_en: str, k: int = 4):
+    t0 = t()
     # retrieve() is sync; run in a thread for true parallelism
-    return await asyncio.to_thread(lambda: retrieve(query_en, k=k))
+    result = await asyncio.to_thread(lambda: retrieve(query_en, k=k))
+    timing_ms = round((t() - t0) * 1000)
+    print(f"⏱️  RAG retrieve: {timing_ms}ms")
+    return result
 
 async def _run_price(req: AskRequest):
-    return await latest_price(
-        req.crop or settings.DEFAULT_CROP,
-        district=req.district, state=req.state, market=req.market,
-        variety=req.variety, grade=req.grade, debug=req.debug
+    t0 = t()
+    result = await latest_price(
+        req.crop or settings.DEFAULT_CROP,  # positional argument
+        district=req.district, 
+        state=req.state, 
+        market=req.market,
+        variety=req.variety, 
+        grade=req.grade, 
+        debug=req.debug
     )
+    timing_ms = round((t() - t0) * 1000)
+    print(f"⏱️  Price lookup: {timing_ms}ms")
+    return result
 
-async def _run_sell_wait(req: AskRequest):
-    return await advise_sell_or_wait(
+async def _run_sell_wait(req: AskRequest, price_ctx: Optional[Dict[str, Any]] = None):
+    t0 = t()
+    result = await advise_sell_or_wait(
         commodity=req.crop or settings.DEFAULT_CROP,
         state=req.state, district=req.district, market=req.market,
         variety=req.variety, grade=req.grade,
         horizon_days=req.horizon_days or settings.SELLWAIT_DEFAULT_HORIZON_DAYS,
         qty_qtl=req.qty_qtl,
-        debug=req.debug
+        debug=req.debug,
+        price_context=price_ctx
     )
+    timing_ms = round((t() - t0) * 1000)
+    print(f"⏱️  Pricing analysis: {timing_ms}ms")
+    return result
 
 async def _run_weather(req: AskRequest):
+    t0 = t()
     g = req.geo or {}
     if not g or g.lat is None or g.lon is None:
         raise ValueError("weather: missing lat/lon")
-    return await wx_forecast(g.lat, g.lon, tz="auto")
+    result = await wx_forecast(g.lat, g.lon, tz="auto")
+    timing_ms = round((t() - t0) * 1000)
+    print(f"⏱️  Weather forecast: {timing_ms}ms")
+    return result
 
 async def _run_ndvi_quicklook(req, aoi_km: Optional[float] = None):
     g = req.geo or {}
@@ -62,17 +86,20 @@ async def _run_ndvi_quicklook(req, aoi_km: Optional[float] = None):
 
 
 async def _run_ndvi(req: AskRequest):
-    
+    t0 = t()
     g = req.geo or {}
     if not g or g.lat is None or g.lon is None:
         raise ValueError("ndvi: missing lat/lon")
-    return await ndvi_snapshot(
+    result = await ndvi_snapshot(
         lat=g.lat, lon=g.lon,
         aoi_km=settings.SENTINEL_AOI_KM,
         recent_days=settings.SENTINEL_RECENT_DAYS,
         prev_days=settings.SENTINEL_PREV_DAYS,
         gap_days=settings.SENTINEL_GAP_DAYS,
     )
+    timing_ms = round((t() - t0) * 1000)
+    print(f"⏱️  NDVI analysis: {timing_ms}ms")
+    return result
 
 
 # ---------- summarization for tool notes ----------
@@ -239,43 +266,126 @@ def _summarize_tools(results: Dict[str, Any], horizon_days: int) -> str:
 
 # ---------- main entry ----------
 async def answer(req: AskRequest) -> AskResponse:
+    t0 = t()
+    
     # 1) Language handling
     in_lang = req.lang or detect_lang(req.text)
     text_en = req.text if in_lang == "en" else translate_to_en(req.text)
 
-    # 2) Fan out (schedule ONCE)
-    tasks: Dict[str, asyncio.Future] = {}
+    # 2) Initialize results and timings properly
+    results: Dict[str, Any] = {}
+    timings: Dict[str, int] = {}  # Initialize timings dict
+    
+    # Start all parallel tasks
+    print("⏳ Starting to await rag...")
+    rag_start = t()
+    tasks = {}
     tasks["rag"] = asyncio.create_task(_run_rag(text_en, k=settings.RAG_TOPK))
+    
+    # Weather & NDVI only if geo present
+    weather_start = ndvi_start = None
+    if req.geo and req.geo.lat is not None and req.geo.lon is not None:
+        print("⏳ Starting to await weather...")
+        weather_start = t()
+        tasks["weather"] = asyncio.create_task(_run_weather(req))
+        
+        print("⏳ Starting to await ndvi...")
+        ndvi_start = t()
+        tasks["ndvi"] = asyncio.create_task(_run_ndvi(req))
 
-    # Only run market tools if we have at least some crop/geo hint
+    # Price-dependent: await price first, then start sell_wait
+    sell_start = sell14_start = None
     if req.crop or req.state or req.district or req.market:
-        tasks["price"] = asyncio.create_task(_run_price(req))
-        # primary SELL/WAIT at requested horizon
-        tasks["sell_wait"] = asyncio.create_task(_run_sell_wait(req))
-        # optional 2-week SELL/WAIT as a second view
+        print("⏳ Starting to await price...")
+        price_start = t()
+        price_res = await _run_price(req)
+        price_ms = round((t() - price_start) * 1000)
+        results["price"] = price_res
+        timings["price"] = price_ms
+        print(f"✅ price: completed in {price_ms}ms")
+        
+        # Now start sell_wait tasks with price context
+        print("⏳ Starting to await sell_wait...")
+        sell_start = t()
+        tasks["sell_wait"] = asyncio.create_task(_run_sell_wait(req, price_ctx=price_res))
+        
         if settings.SELLWAIT_INCLUDE_2WEEK:
+            print("⏳ Starting to await sell_wait_14...")
+            sell14_start = t()
             tasks["sell_wait_14"] = asyncio.create_task(
                 advise_sell_or_wait(
                     commodity=req.crop or settings.DEFAULT_CROP,
                     state=req.state, district=req.district, market=req.market,
                     variety=req.variety, grade=req.grade,
-                    horizon_days=14, qty_qtl=req.qty_qtl, debug=req.debug
+                    horizon_days=14, qty_qtl=req.qty_qtl, debug=req.debug,
+                    price_context=price_res
                 )
             )
 
-
-    # Weather & NDVI only if geo present
-    if req.geo and req.geo.lat is not None and req.geo.lon is not None:
-        tasks["weather"] = asyncio.create_task(_run_weather(req))
-        tasks["ndvi"] = asyncio.create_task(_run_ndvi(req))   # (stats)
-
-    # 3) Gather results robustly
-    results: Dict[str, Any] = {}
-    for name, fut in tasks.items():
+    # 3) Await remaining tasks with proper timing
+    if "rag" in tasks:
         try:
-            results[name] = await fut
+            results["rag"] = await tasks["rag"]
+            rag_ms = round((t() - rag_start) * 1000)
+            timings["rag"] = rag_ms
+            print(f"rag: completed")
         except Exception as e:
-            results[name] = {"error": str(e)}
+            rag_ms = round((t() - rag_start) * 1000)
+            timings["rag"] = rag_ms
+            results["rag"] = {"error": str(e)}
+            print(f"rag: failed - {str(e)}")
+
+    if "weather" in tasks and weather_start is not None:
+        try:
+            results["weather"] = await tasks["weather"]
+            weather_ms = round((t() - weather_start) * 1000)
+            timings["weather"] = weather_ms
+            print(f"weather: completed")
+        except Exception as e:
+            weather_ms = round((t() - weather_start) * 1000)
+            timings["weather"] = weather_ms
+            results["weather"] = {"error": str(e)}
+            print(f"weather: failed - {str(e)}")
+
+    if "ndvi" in tasks and ndvi_start is not None:
+        try:
+            results["ndvi"] = await tasks["ndvi"]
+            ndvi_ms = round((t() - ndvi_start) * 1000)
+            timings["ndvi"] = ndvi_ms
+            print(f"ndvi: completed")
+        except Exception as e:
+            ndvi_ms = round((t() - ndvi_start) * 1000)
+            timings["ndvi"] = ndvi_ms
+            results["ndvi"] = {"error": str(e)}
+            print(f"ndvi: failed - {str(e)}")
+
+    if "sell_wait" in tasks and sell_start is not None:
+        try:
+            results["sell_wait"] = await tasks["sell_wait"]
+            sell_ms = round((t() - sell_start) * 1000)
+            timings["sell_wait"] = sell_ms
+            print(f"sell_wait: completed")
+        except Exception as e:
+            sell_ms = round((t() - sell_start) * 1000)
+            timings["sell_wait"] = sell_ms
+            results["sell_wait"] = {"error": str(e)}
+            print(f"sell_wait: failed - {str(e)}")
+
+    if "sell_wait_14" in tasks and sell14_start is not None:
+        try:
+            results["sell_wait_14"] = await tasks["sell_wait_14"]
+            sell14_ms = round((t() - sell14_start) * 1000)
+            timings["sell_wait_14"] = sell14_ms
+            print(f"sell_wait_14: completed")
+        except Exception as e:
+            sell14_ms = round((t() - sell14_start) * 1000)
+            timings["sell_wait_14"] = sell14_ms
+            results["sell_wait_14"] = {"error": str(e)}
+            print(f"sell_wait_14: failed - {str(e)}")
+
+    # Store timings BEFORE accessing it
+    results["_timings"] = timings
+
 
     # 3b) Build NDVI quicklook AFTER we know which AOI worked
     if (
@@ -363,28 +473,24 @@ async def answer(req: AskRequest) -> AskResponse:
 
     # 5) Synthesize final answer from RAG + tool summary
     rag_topk = results.get("rag") or []
-    synth = synthesize(text_en, rag_topk, tool_notes=tool_summary)
+    ts = t()
+    synth = synthesize(text_en, rag_topk, tool_notes=tool_summary) 
+    results["_timings"]["synthesize_ms"] = round((t()-ts)*1000)
     ans_en = synth["answer"]
     sources = [Source(**s) for s in synth.get("sources", [])]
 
     # 6) Translate back if needed
     final_text = ans_en if in_lang == "en" else translate_from_en(ans_en, in_lang)
 
-    # 7) Follow-ups
-    followups = [
-        "Ask this in my language",
-        "Compare another market or crop",
-        "Change holding period",
-        "Share my location for local weather/NDVI" if not (req.geo and req.geo.lat is not None) else "See field-wise NDVI history",
-    ]
-    if isinstance(results.get("ndvi_quicklook"), dict) and results["ndvi_quicklook"].get("available"):
-        followups.insert(0, "Open NDVI image")
+    # Log timing summary
+    print(f"⏱️  Request timing: {results.get('_timings', {})}")
 
     return AskResponse(
         answer=final_text,
         sources=sources,
-        tool_notes=results,   # raw tool outputs for debugging/telemetry
-        follow_ups=followups,
+        tool_notes=results,
         lang=in_lang,
+        timings=results["_timings"],
+        debug_info=results if req.debug else None
     )
 

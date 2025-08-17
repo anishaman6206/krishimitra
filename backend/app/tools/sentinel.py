@@ -1,5 +1,6 @@
 import os
 import datetime as dt
+import time
 from math import cos, radians
 from typing import Dict, Optional
 from PIL import Image
@@ -12,6 +13,8 @@ from sentinelhub import (
 
 from dotenv import load_dotenv
 from pathlib import Path
+
+def t(): return time.perf_counter()
 
 dotenv_path = Path(__file__).parents[3] / '.env'
 load_dotenv(dotenv_path)
@@ -151,6 +154,7 @@ def _ndvi_mean_for_range(bbox, start, end, cfg):
 
 async def ndvi_snapshot(lat: float, lon: float, aoi_km: float = 0.5,
                         recent_days: int = 10, prev_days: int = 10, gap_days: int = 7) -> Dict:
+    start = t()
     cfg = _sh_config()
 
     # AOIs to try in order (don’t duplicate if caller already passed a large one)
@@ -243,6 +247,9 @@ async def ndvi_snapshot(lat: float, lon: float, aoi_km: float = 0.5,
         if   delta > 0.02: trend = "rising"
         elif delta < -0.02: trend = "falling"
         else:               trend = "stable"
+
+    total_ms = round((t() - start) * 1000)
+    print(f"⏱️  NDVI snapshot: {total_ms}ms (AOI: {aoi_used}km)")
 
     return {
         "ndvi_latest": cur_stats_best.get("mean"),

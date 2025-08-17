@@ -15,8 +15,20 @@ async def init_http():
         http2_available = False
         print("⚠️  HTTP/2 not available. Install with: pip install httpx[http2]")
 
+    # Set reasonable timeouts for different API types:
+    # - connect: 10s (establishing connection)
+    # - read: 25s (reading response) 
+    # - write: 10s (sending request)
+    # - pool: 30s (getting connection from pool)
+    timeout_config = httpx.Timeout(
+        connect=10.0,
+        read=25.0,
+        write=10.0,
+        pool=30.0
+    )
+
     client = httpx.AsyncClient(
-        timeout=20,
+        timeout=timeout_config,
         http2=http2_available,
         limits=httpx.Limits(
             max_keepalive_connections=100, 

@@ -1,6 +1,10 @@
+import time
 from app.http import get_http_client
 
+def t(): return time.perf_counter()
+
 async def geocode_text(q: str) -> tuple[float, float] | None:
+    start = t()
     url = "https://nominatim.openstreetmap.org/search"
     params = {"q": q, "format": "json", "limit": 1}
     
@@ -10,6 +14,8 @@ async def geocode_text(q: str) -> tuple[float, float] | None:
     r.raise_for_status()
     arr = r.json()
     
-    if not arr: 
-        return None
-    return float(arr[0]["lat"]), float(arr[0]["lon"])
+    ms = round((t() - start) * 1000)
+    result = None if not arr else (float(arr[0]["lat"]), float(arr[0]["lon"]))
+    print(f"⏱️  Geocoding '{q}': {ms}ms -> {result}")
+    
+    return result

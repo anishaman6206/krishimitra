@@ -1,7 +1,10 @@
 # backend/app/rag/generate.py
+import time
 from typing import List, Dict, Any
 from langchain_openai import ChatOpenAI
 from app.config import settings
+
+def t(): return time.perf_counter()
 
 def _compact_context(passages: List[Dict[str, Any]]) -> str:
     chunks = []
@@ -23,6 +26,7 @@ def _extract_week_bullets(tool_notes: str) -> str:
     return "\n".join(bullets)
 
 def synthesize(question: str, topk: List[Dict[str, Any]], tool_notes: str = "") -> Dict[str, Any]:
+    start = t()
     llm = ChatOpenAI(model=settings.OPENAI_MODEL, temperature=0.3, timeout=30)
 
     context_block = _compact_context(topk)
@@ -67,5 +71,9 @@ def synthesize(question: str, topk: List[Dict[str, Any]], tool_notes: str = "") 
         })
         if len(sources) >= 5:
             break
+
+    total_ms = round((t() - start) * 1000)
+    tokens_est = len(system + user) // 4
+    print(f"⏱️  LLM synthesis: {total_ms}ms (~{tokens_est} tokens)")
 
     return {"answer": answer_text, "sources": sources}
