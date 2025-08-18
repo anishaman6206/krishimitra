@@ -6,10 +6,17 @@ from app.schemas import AskRequest, AskResponse, Source
 from app.tools.lang import detect_lang, translate_to_en, translate_from_en
 from app.rag.retrieve import retrieve
 from app.rag.generate import synthesize
-from app.tools.mandi import latest_price
-from app.tools.pricing import advise_sell_or_wait
-from app.tools.weather import forecast_24h as wx_forecast
-from app.tools.sentinel import sentinel_summary
+
+#  Use cached wrappers
+from app.tools.mandi_cached import (
+    latest_price_cached as latest_price,
+    advise_sell_or_wait_cached as advise_sell_or_wait,
+)
+from app.tools.sentinel_cached import sentinel_summary_cached as sentinel_summary
+from app.tools.weather_cached import forecast_24h_cached as wx_forecast
+
+
+#from app.tools.sentinel import sentinel_summary
 from app.config import settings
 
 # ------------ timing helper ------------
@@ -63,11 +70,11 @@ async def _run_weather(req: AskRequest):
     return result
 
 async def _run_veg(req: AskRequest):
+    t0 = t()
     g = req.geo or {}
     if not g or g.lat is None or g.lon is None:
         raise ValueError("veg: missing lat/lon")
 
-    # Auto-grow AOI: start → max (meters)
     start_km = getattr(settings, "SENTINEL_START_AOI_KM", 0.5)
     max_km   = getattr(settings, "SENTINEL_MAX_AOI_KM", 3.0)
     start_m  = int(start_km * 1000)
@@ -75,18 +82,20 @@ async def _run_veg(req: AskRequest):
 
     canonical = [200, 500, 1000, 2000, 3000]
     steps = [start_m] + [s for s in canonical if s >= start_m and s <= max_m]
-    steps = tuple(dict.fromkeys(steps))  # de-dupe, keep order
+    steps = tuple(dict.fromkeys(steps))
 
-    t0 = t()
-    result = await sentinel_summary(
+    # cached call
+    return await sentinel_summary(
         lat=g.lat,
         lon=g.lon,
         farm_size_meters=start_m,
-        recent_days=getattr(settings, "SENTINEL_RECENT_DAYS", 45),
-        resolution=10,
+        recent_days=45,
+        resolution=10,                                             
         autogrow=True,
-        aoi_steps_m=steps
+        aoi_steps_m=steps,
+        min_cov_pct=5.0,
     )
+
     print(f"⏱️  NDVI/NDMI/NDWI/LAI analysis: {round((t() - t0) * 1000)}ms")
     return result
 
@@ -238,6 +247,21 @@ async def answer(req: AskRequest) -> AskResponse:
     rag_start = t()
     tasks["rag"] = asyncio.create_task(_run_rag(text_en, k=settings.RAG_TOPK))
 
+    # --- NEW: infer admin area from lat/lon if missing ---
+    if req.geo and req.geo.lat is not None and req.geo.lon is not None:
+        from app.tools.geo import reverse_geocode_admin
+        geo_admin = await reverse_geocode_admin(req.geo.lat, req.geo.lon)
+    
+        # only fill if user didn’t specify
+        if not req.state and geo_admin.get("state"):
+            req.state = geo_admin["state"]
+        if not req.district and geo_admin.get("district"):
+            req.district = geo_admin["district"]
+    
+    
+        if req.market and geo_admin.get("district") and req.district and req.district.lower() != geo_admin["district"].lower():
+            req.market = None
+
     # Weather & Sentinel only if geo present
     weather_start = veg_start = None
     if req.geo and req.geo.lat is not None and req.geo.lon is not None:
@@ -266,6 +290,7 @@ async def answer(req: AskRequest) -> AskResponse:
                 tasks["sell_wait_14"] = asyncio.create_task(_run_sell_wait(req, price_ctx=price_res, horizon_days=14))
                 timings["_sell14_start_ms"] = round((t() - sw14_start) * 1000)
             timings["_sell_start_ms"] = round((t() - sw_start) * 1000)
+            
 
     # 3) Await remaining tasks robustly
     if "rag" in tasks:

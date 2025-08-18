@@ -19,6 +19,8 @@ load_dotenv(dotenv_path)
 os.environ.setdefault("CHROMA_TELEMETRY_ENABLED", "false")
 os.environ.setdefault("CHROMADB_DISABLE_TELEMETRY", "1")
 
+
+
 HERE = Path(__file__).resolve()
 BACKEND_DIR = HERE.parents[2]                     # .../backend
 SEEDS_DIR = BACKEND_DIR / "ingestion" / "seeds"
@@ -27,6 +29,56 @@ META_PATH = PERSIST_DIR / ".build_meta.json"
 
 EMBED_MODEL = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+
+# add near the top:
+from chromadb.config import Settings
+
+CHROMA_SETTINGS = Settings(
+    anonymized_telemetry=False,   # <- silences PostHog errors for good
+    allow_reset=True
+)
+
+# singletons
+_DB: Chroma | None = None
+_EMB: OpenAIEmbeddings | None = None
+
+def build_or_load_index(rebuild: bool = False) -> Chroma:
+    """
+    Build once, then reuse the same Chroma instance (and embeddings) in-process.
+    Rebuild only if seeds changed or rebuild=True.
+    """
+    global _DB, _EMB
+
+    if _DB is not None and not rebuild:
+        return _DB
+
+    PERSIST_DIR.mkdir(parents=True, exist_ok=True)
+    if _EMB is None:
+        _EMB = OpenAIEmbeddings(model=EMBED_MODEL, api_key=OPENAI_API_KEY)
+
+    if _need_rebuild(rebuild):
+        docs = load_corpus()
+        _DB = Chroma.from_documents(
+            docs,
+            _EMB,
+            collection_name="krishi_rag",
+            persist_directory=str(PERSIST_DIR),
+            collection_metadata={"hnsw:space": "cosine"},
+            client_settings=CHROMA_SETTINGS,     # <- important
+        )
+        _save_meta()
+        print(f"🧱 RAG index built: {len(docs)} chunks → {PERSIST_DIR}")
+    else:
+        _DB = Chroma(
+            embedding_function=_EMB,
+            collection_name="krishi_rag",
+            persist_directory=str(PERSIST_DIR),
+            client_settings=CHROMA_SETTINGS,     # <- important
+        )
+        print(f"📦 RAG index loaded from {PERSIST_DIR}")
+
+    return _DB
 
 def _find_seed_files() -> List[Path]:
     SEEDS_DIR.mkdir(parents=True, exist_ok=True)

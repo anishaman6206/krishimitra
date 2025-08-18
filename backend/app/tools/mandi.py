@@ -3,7 +3,7 @@ import json
 import asyncio
 import datetime as dt
 import time
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import xml.etree.ElementTree as ET
 from statistics import median
 import datetime as _dt

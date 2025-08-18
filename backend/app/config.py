@@ -32,8 +32,8 @@ class Settings:
     WX_SUMMARY_DAYS: int  = int(os.getenv("WX_SUMMARY_DAYS", "3"))
 
     STATIC_DIR: str = os.getenv("STATIC_DIR", str((Path(__file__).resolve().parents[1] / "static")))
-    SENTINEL_ENABLE_QUICKLOOK: bool = os.getenv("SENTINEL_ENABLE_QUICKLOOK", "1") == "1"
-    SENTINEL_QUICKLOOK_RECENT_DAYS: int = int(os.getenv("SENTINEL_QUICKLOOK_RECENT_DAYS", "20"))
+
+   
 
     # Sentinel/NDVI windows
  

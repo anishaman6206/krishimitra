@@ -10,6 +10,10 @@ from app.config import settings
 from app.http import init_http, close_http
 from app.utils.cache import init_cache
 
+from app.rag.index import build_or_load_index
+
+
+
 # Single FastAPI instance
 app = FastAPI()
 
@@ -28,6 +32,14 @@ async def shutdown_event():
     """Close HTTP client on shutdown."""
     await close_http()
     print("HTTP client closed")
+
+
+@app.on_event("startup")
+async def _warm_rag():
+    # run in a thread to avoid blocking the event loop if needed
+    import asyncio
+    await asyncio.to_thread(lambda: build_or_load_index(rebuild=False))
+
 
 # CORS middleware
 app.add_middleware(

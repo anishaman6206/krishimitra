@@ -3,10 +3,30 @@ import subprocess
 import httpx
 import base64
 from typing import Tuple
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load environment variables from the root of the project
+dotenv_path = Path(__file__).parents[3] / ".env"
+load_dotenv(dotenv_path)
 
 ELEVEN_LABS_API_KEY = os.getenv("ELEVEN_LABS_API_KEY")
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 ELEVEN_LABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech"
+
+
+# import os, subprocess
+
+# FFMPEG = os.environ.get("FFMPEG_BIN", r"C:\Users\anish\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg.Essentials_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-7.1.1-essentials_build\bin\ffmpeg.exe")
+# FFPROBE = os.environ.get("FFPROBE_BIN", r"C:\Users\anish\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg.Essentials_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-7.1.1-essentials_build\bin\ffprobe.exe")
+
+# def opus_to_wav(src_ogg, dst_wav):
+#     subprocess.run([FFMPEG, "-y", "-i", src_ogg, "-ac", "1", "-ar", "16000", dst_wav], check=True)
+
+# def wav_to_opus(src_wav, dst_ogg):
+#     subprocess.run([FFMPEG, "-y", "-i", src_wav, "-c:a", "libopus", "-b:a", "32k", dst_ogg], check=True)
+
 
 async def opus_to_wav(input_path: str, output_path: str) -> None:
     """Convert OGG/Opus to WAV/PCM 16kHz mono using ffmpeg."""

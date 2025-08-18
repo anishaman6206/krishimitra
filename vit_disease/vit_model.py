@@ -1,30 +1,46 @@
-from transformers import ViTFeatureExtractor, ViTForImageClassification
-from PIL import Image
-import torch
+# vit_disease/vit_model.py
 import os
+from pathlib import Path
+import torch
+from PIL import Image
 
-MODEL_DIR = "./vit-plant-disease"
+from transformers import AutoImageProcessor, AutoModelForImageClassification
 
-# Load the fine-tuned feature extractor and model
-feature_extractor = ViTFeatureExtractor.from_pretrained(MODEL_DIR)
-model = ViTForImageClassification.from_pretrained(MODEL_DIR)
+# --- Resolve model directory robustly ---
+HERE = Path(__file__).resolve().parent
+# prefer env var if provided, otherwise use folder next to this file
+MODEL_DIR = Path(os.getenv("VIT_MODEL_DIR", str(HERE / "vit-plant-disease"))).resolve()
 
-def predict_disease(image_path):
-    """
-    Predict plant disease from a leaf image using the fine-tuned ViT.
-    """
-    if not os.path.exists(image_path):
-        raise FileNotFoundError(f"Image not found: {image_path}")
+def _has(path: Path, name: str) -> bool:
+    return (path / name).exists()
 
-    # Load and preprocess image
-    image = Image.open(image_path).convert("RGB")
-    inputs = feature_extractor(images=image, return_tensors="pt")
+if not MODEL_DIR.exists():
+    raise FileNotFoundError(
+        f"[vit_model] MODEL_DIR does not exist: {MODEL_DIR}\n"
+        "Set VIT_MODEL_DIR in your .env to the folder that contains "
+        "config.json, preprocessor_config.json (or image_processor_config.json), "
+        "and model.safetensors/pytorch_model.bin."
+    )
 
-    # Forward pass
-    with torch.no_grad():
-        outputs = model(**inputs)
-        predicted_class_idx = outputs.logits.argmax(-1).item()
+# sanity checks
+if not (_has(MODEL_DIR, "model.safetensors") or _has(MODEL_DIR, "pytorch_model.bin")):
+    raise FileNotFoundError(f"[vit_model] No model weights found in {MODEL_DIR}")
 
-    # Map index to class label
-    label = model.config.id2label[predicted_class_idx]
-    return label
+# Prefer local image processor; if missing, fall back to a base preprocessor id
+FALLBACK_PREPROC_ID = os.getenv("VIT_PREPROCESSOR_ID", "google/vit-base-patch16-224-in21k")
+try:
+    image_processor = AutoImageProcessor.from_pretrained(str(MODEL_DIR), local_files_only=True)
+except Exception:
+    image_processor = AutoImageProcessor.from_pretrained(FALLBACK_PREPROC_ID)
+
+model = AutoModelForImageClassification.from_pretrained(str(MODEL_DIR), local_files_only=True)
+model.eval()
+id2label = model.config.id2label if hasattr(model.config, "id2label") else None
+
+@torch.inference_mode()
+def predict_disease(image_path: str) -> str:
+    img = Image.open(image_path).convert("RGB")
+    inputs = image_processor(images=img, return_tensors="pt")
+    logits = model(**inputs).logits
+    pred_id = int(torch.argmax(logits, dim=-1))
+    return id2label.get(pred_id, str(pred_id)) if id2label else str(pred_id)

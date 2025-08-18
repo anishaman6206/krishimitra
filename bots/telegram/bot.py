@@ -8,6 +8,18 @@ from typing import Any, Dict, Optional, Tuple, List
 import httpx
 from dotenv import load_dotenv
 
+from pathlib import Path
+import tempfile, time, asyncio
+
+import asyncio
+import time
+import tempfile
+from pathlib import Path
+
+from telegram import Update
+from telegram.ext import ContextTypes, MessageHandler, filters
+from telegram.constants import ParseMode
+
 from telegram import (
     Update,
     InlineKeyboardMarkup,
@@ -26,6 +38,25 @@ from telegram.ext import (
     filters,
 )
 
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load environment variables from the root of the project
+dotenv_path = Path(__file__).parents[3] / ".env"
+load_dotenv(dotenv_path)
+
+
+from inspect import iscoroutinefunction
+from telegram.constants import ParseMode
+
+# If your files are in vit_disease/...
+from vit_disease.vit_model import predict_disease
+from vit_disease.llm_helper import generate_disease_info
+from vit_disease.twilio_helper import send_via_twilio
+
+import os
+TWILIO_ENABLED = os.getenv("TWILIO_ENABLED", "0") == "1"
 # --------------------
 # ENV & CONFIG
 # --------------------
@@ -134,8 +165,7 @@ def _split_chunks(s: str, n: int = 4000) -> List[str]:
 
 def _mk_reply_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        [[KeyboardButton("📍 Share location", request_location=True)],
-         [KeyboardButton("🧾 Example: Should I sell tomatoes now?")]],
+        [[KeyboardButton("📍 Share location", request_location=True)]],
         resize_keyboard=True
     )
 
@@ -153,10 +183,10 @@ def _mk_inline_kb(tool_notes: dict | None, user_text: str | None = None) -> Inli
 
     # Price horizon buttons ONLY for market queries
     if _is_market_query(user_text or ""):
-        rows.append([
-            InlineKeyboardButton("Set horizon: 7d", callback_data="h7"),
-            InlineKeyboardButton("Set horizon: 14d", callback_data="h14"),
-        ])
+        # rows.append([
+        #     InlineKeyboardButton("Set horizon: 7d", callback_data="h7"),
+        #     InlineKeyboardButton("Set horizon: 14d", callback_data="h14"),
+        # ])
         rows.append([InlineKeyboardButton("⚙️ Set market", callback_data="set_market")])
 
     return InlineKeyboardMarkup(rows) if rows else None
@@ -317,6 +347,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prefs = _prefs(context, chat_id)
 
         file_id = update.message.voice.file_id
+        print(f"Processing voice note: {file_id}")
         t_short = hashlib.md5(file_id.encode()).hexdigest()[:12]
         ogg = f"voice_{chat_id}_{t_short}.ogg"
         wav = f"voice_{chat_id}_{t_short}.wav"
@@ -426,16 +457,70 @@ async def on_hear_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --------------------
 # Command / message handlers
 # --------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    prefs = _prefs(context, update.effective_chat.id)
-    prefs["lang"] = prefs.get("lang") or _guess_lang(update)
-    await update.message.reply_text(
-        "👋 नमस्ते / Hello! I’m **KrishiMitra AI**.\n\n"
-        "Ask: *“Should I sell tomatoes now?”*, *“When should I irrigate?”*, *“Will it rain tomorrow?”*.\n"
-        "Tip: Share your location for local weather & NDVI.",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=_mk_reply_kb()
+from telegram.constants import ParseMode
+
+async def start(update, context):
+    msg = (
+        "👋 *Namaste / Hello! I’m KrishiMitra AI.*\n\n"
+        "Type *or speak* in any language — I’ll reply in the same.\n"
+        "आप *किसी भी भाषा* में लिखें या बोलें — मैं उसी भाषा में जवाब दूँगा।\n\n"
+        "_Examples:_\n"
+        "• *English:* Where can I get affordable credit…?\n"
+        "• *Hinglish:* Kal barish hogi? irrigation kab karu?\n"
+        "• *Hindi:* क्या मुझे इस हफ्ते टमाटर बेचना चाहिए?\n\n"
+        "🌱 You can also send a clear photo of a plant leaf for instant disease detection and cure tips.\n\n"
+        "Tip: tap *📍 Share location* for local prices, weather & NDVI."
     )
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=_mk_reply_kb())
+
+
+async def handle_leaf_photo(update, context):
+    """Handle leaf photos: classify + give LLM guidance + (optional) Twilio forward."""
+    if not update.message or not update.message.photo:
+        return
+
+    # Highest-resolution Telegram keeps
+    photo = update.message.photo[-1]
+    tg_file = await photo.get_file()
+
+    # Save to temp path
+    tmpdir = Path(tempfile.mkdtemp())
+    image_path = tmpdir / f"leaf_{int(time.time())}.jpg"
+    await tg_file.download_to_drive(str(image_path))
+
+    try:
+        # Offload heavy classification to a worker thread so we don't block the event loop
+        loop = asyncio.get_running_loop()
+        label = await loop.run_in_executor(None, lambda: predict_disease(str(image_path)))
+
+        # Get LLM guidance (works for both sync/async llm_helper)
+        if iscoroutinefunction(generate_disease_info):
+            info_text = await generate_disease_info(label)
+        else:
+            info_text = generate_disease_info(label)
+
+        msg = f"🩺 *Prediction:* {label}\n\n{info_text}"
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+        # Optional: forward via Twilio
+        if TWILIO_ENABLED:
+            try:
+                send_via_twilio(msg)
+            except Exception as e:
+                # Keep bot robust even if Twilio fails
+                print(f"[twilio] send failed: {e}")
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Sorry, I couldn’t analyze that image. ({e})")
+    finally:
+        try:
+            if image_path.exists():
+                image_path.unlink(missing_ok=True)
+            tmpdir.rmdir()
+        except Exception:
+            pass
+
+
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -596,6 +681,11 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    # ...
+
+# Put this BEFORE your catch-all text handler:
+    app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_leaf_photo))
+
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("health", health))
 
