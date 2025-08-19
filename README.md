@@ -26,7 +26,7 @@ This project brings together a suite of powerful tools to answer a farmer's most
 - Here are some screenshots showcasing the KrishiMitra AI bot in action.
   
 <img width="630" height="460" alt="Screenshot 2025-08-19 105251" src="https://github.com/user-attachments/assets/38b88e56-d17c-48f1-be37-00b8a42f3d99" /> 
-<img width="619" height="841" alt="Screenshot 2025-08-19 105314" src="https://github.com/user-attachments/assets/63ce3f1f-5f19-493d-bb10-4d0b50246f87" />
+<img width="489" height="519" alt="image" src="https://github.com/user-attachments/assets/7a959e34-8d0e-4b90-8702-e8a9847ce1fd" />
 <img width="635" height="697" alt="Screenshot 2025-08-19 105346" src="https://github.com/user-attachments/assets/dfa1747f-3ea4-491e-9022-2016b1c5731c" />
 <img width="615" height="849" alt="Screenshot 2025-08-19 105358" src="https://github.com/user-attachments/assets/30b375f5-15ee-44b4-9bfe-76b281c46d3f" />
 <img width="626" height="867" alt="Screenshot 2025-08-19 105412" src="https://github.com/user-attachments/assets/7e24fb92-d546-4355-8ac1-71245cc04679" />
