@@ -22,19 +22,6 @@ This project brings together a suite of powerful tools to answer a farmer's most
 
 ---
 
-### 📸 Key Features in Action
-Here are some screenshots showcasing the KrishiMitra AI bot in action.
-
-- Welcome & Location. Onboarding new users with multilingual examples.
-<img width="630" height="460" alt="Screenshot 2025-08-19 105251" src="https://github.com/user-attachments/assets/38b88e56-d17c-48f1-be37-00b8a42f3d99" />
-<img width="489" height="519" alt="image" src="https://github.com/user-attachments/assets/7a959e34-8d0e-4b90-8702-e8a9847ce1fd" />
-<img width="635" height="697" alt="Screenshot 2025-08-19 105346" src="https://github.com/user-attachments/assets/dfa1747f-3ea4-491e-9022-2016b1c5731c" />
-<img width="615" height="849" alt="Screenshot 2025-08-19 105358" src="https://github.com/user-attachments/assets/30b375f5-15ee-44b4-9bfe-76b281c46d3f" />
-<img width="626" height="867" alt="Screenshot 2025-08-19 105412" src="https://github.com/user-attachments/assets/7e24fb92-d546-4355-8ac1-71245cc04679" />
-<img width="627" height="477" alt="image" src="https://github.com/user-attachments/assets/f293c2af-614a-47f2-9bf5-9c85fcdb0ecf" />
-<img width="609" height="331" alt="Screenshot 2025-08-19 105447" src="https://github.com/user-attachments/assets/a91860a6-e680-4bee-9e8c-9536b0333ff2" />
-<img width="363" height="668" alt="image" src="https://github.com/user-attachments/assets/c21ad1be-63ff-4374-9e2e-59700c683379" />
-
 ## 🚀 Quick Start
 
 ### Clone the Repository
@@ -122,6 +109,10 @@ models/
 
 ---
 
+### 💻 Tech Stack
+<img width="957" height="571" alt="image" src="https://github.com/user-attachments/assets/9226094d-03e1-4352-b1ce-748668de35b8" />
+
+
 ## 🔑 Environment Variables (.env)
 
 Use `.env.example` as a template. You will need to provide the following keys:
@@ -185,7 +176,6 @@ Start a chat with your bot and try these commands:
 
 - Share your location (📍)
 - Ask a question:
-- "Should I sell now?"
 - "कल बारिश होगी?"
 - "What seed variety suits this unpredictable weather?"
 - "क्या मुझे इस हफ्ते टमाटर बेचना चाहिए?"
@@ -194,3 +184,17 @@ Start a chat with your bot and try these commands:
 
 - Send a photo of a diseased plant leaf.
 - Send a voice note with your question.
+---
+
+### 📸 Key Features in Action
+Here are some screenshots showcasing the KrishiMitra AI bot in action.
+
+- Welcome & Location. Onboarding new users with multilingual examples.
+<img width="630" height="460" alt="Screenshot 2025-08-19 105251" src="https://github.com/user-attachments/assets/38b88e56-d17c-48f1-be37-00b8a42f3d99" />
+<img width="489" height="519" alt="image" src="https://github.com/user-attachments/assets/7a959e34-8d0e-4b90-8702-e8a9847ce1fd" />
+<img width="635" height="697" alt="Screenshot 2025-08-19 105346" src="https://github.com/user-attachments/assets/dfa1747f-3ea4-491e-9022-2016b1c5731c" />
+<img width="615" height="849" alt="Screenshot 2025-08-19 105358" src="https://github.com/user-attachments/assets/30b375f5-15ee-44b4-9bfe-76b281c46d3f" />
+<img width="626" height="867" alt="Screenshot 2025-08-19 105412" src="https://github.com/user-attachments/assets/7e24fb92-d546-4355-8ac1-71245cc04679" />
+<img width="627" height="477" alt="image" src="https://github.com/user-attachments/assets/f293c2af-614a-47f2-9bf5-9c85fcdb0ecf" />
+<img width="609" height="331" alt="Screenshot 2025-08-19 105447" src="https://github.com/user-attachments/assets/a91860a6-e680-4bee-9e8c-9536b0333ff2" />
+<img width="363" height="668" alt="image" src="https://github.com/user-attachments/assets/c21ad1be-63ff-4374-9e2e-59700c683379" />
