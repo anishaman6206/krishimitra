@@ -31,7 +31,7 @@ Here are some screenshots showcasing the KrishiMitra AI bot in action.
 <img width="635" height="697" alt="Screenshot 2025-08-19 105346" src="https://github.com/user-attachments/assets/dfa1747f-3ea4-491e-9022-2016b1c5731c" />
 <img width="615" height="849" alt="Screenshot 2025-08-19 105358" src="https://github.com/user-attachments/assets/30b375f5-15ee-44b4-9bfe-76b281c46d3f" />
 <img width="626" height="867" alt="Screenshot 2025-08-19 105412" src="https://github.com/user-attachments/assets/7e24fb92-d546-4355-8ac1-71245cc04679" />
-<img width="609" height="758" alt="Screenshot 2025-08-19 105429" src="https://github.com/user-attachments/assets/590b3c5b-1aa6-4a15-9247-c977abb9afe0" />
+<img width="627" height="477" alt="image" src="https://github.com/user-attachments/assets/f293c2af-614a-47f2-9bf5-9c85fcdb0ecf" />
 <img width="609" height="331" alt="Screenshot 2025-08-19 105447" src="https://github.com/user-attachments/assets/a91860a6-e680-4bee-9e8c-9536b0333ff2" />
 <img width="363" height="668" alt="image" src="https://github.com/user-attachments/assets/c21ad1be-63ff-4374-9e2e-59700c683379" />
 
