@@ -11,7 +11,7 @@ This project brings together a suite of powerful tools to answer a farmer's most
 - **📈 Market Price Forecasting:** Fetches live prices from Agmarknet (data.gov.in) and uses ML to provide a farmer-friendly Sell / Wait recommendation for the next 1-2 weeks.
 - **🛰️ Real-Time Satellite Analysis:** Leverages Sentinel-2 data to analyze vegetation health (NDVI, NDMI, NDWI, LAI), automatically adjusting the area of interest to find cloud-free images.
 - **🌦️ Hyperlocal Weather Forecasts:** Provides detailed 7-day and 24-hour weather summaries for the farmer's specific location.
-- **📚 Fact-Grounded RAG:** Uses a Retrieval-Augmented Generation pipeline over your own documents (PDFs/TXT) to answer complex queries without hallucination.
+- **📚 Fact-Grounded RAG:** Uses a Retrieval-Augmented Generation pipeline over a curated **Agri Knowledge Base** (seeded with official government documents and agricultural university guidelines) to answer complex queries without hallucination.
 - **🌍 Location Intelligence:**
   - `geocode.py`: Converts location names (e.g., "Kharagpur") into precise latitude and longitude using OpenStreetMap.
   - `geo.py`: Performs reverse geocoding to identify the state, district, etc., from geographic coordinates.
@@ -167,8 +167,13 @@ curl -s -X POST http://127.0.0.1:8000/ask \
 Start a chat with your bot and try these commands:
 
 - Share your location (📍)
-- Set market: Karnataka, Bangalore, Ramanagara
-- Set crop tomato
-- Ask a question: "Should I sell now?" or "कल बारिश होगी?"
-- Send a photo of a diseased plant leaf
-- Send a voice note with your question
+- Ask a question:
+- "Should I sell now?"
+- "कल बारिश होगी?"
+- "What seed variety suits this unpredictable weather?"
+- "क्या मुझे इस हफ्ते टमाटर बेचना चाहिए?"
+- "Will next week’s temperature drop kill my yield?"
+- "Kal ka mausam kaisa rahega?"
+
+- Send a photo of a diseased plant leaf.
+- Send a voice note with your question.
