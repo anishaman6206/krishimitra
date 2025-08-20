@@ -4,6 +4,11 @@ A unified, data-driven assistant for Indian farmers, designed to provide actiona
 
 This project brings together a suite of powerful tools to answer a farmer's most pressing questions, from market prices to crop health, all through a simple, accessible interface.
 
+## UPDATE:- 
+### Demo of our 20+ indian local language Voice Assisted chat feature
+
+[![Watch the Video](https://img.youtube.com/vi/DnE3NiOryzE/0.jpg)](https://www.youtube.com/watch?v=DnE3NiOryzE)
+
 ---
 
 ## ✨ Core Features
