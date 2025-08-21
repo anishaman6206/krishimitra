@@ -1,14 +1,15 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pathlib import Path
 from os import makedirs
 
-from app.schemas import AskRequest, AskResponse
-from app.services.pipeline import answer
 from app.config import settings
 from app.http import init_http, close_http
 from app.utils.cache import init_cache
+
+# Import new routers
+from app.routers import ask, mobile
+from app.routers.webhooks import telegram as telegram_webhook
 
 # Single FastAPI instance
 app = FastAPI()
@@ -42,6 +43,11 @@ app.add_middleware(
 makedirs(settings.STATIC_DIR, exist_ok=True)
 app.mount("/static", StaticFiles(directory=settings.STATIC_DIR), name="static")
 
+# Include routers
+app.include_router(ask.router)
+app.include_router(mobile.router)
+app.include_router(telegram_webhook.router)
+
 # API endpoints
 @app.get("/")
 async def root():
@@ -61,11 +67,3 @@ async def health():
             "gap_days": settings.SENTINEL_GAP_DAYS,
         },
     }
-
-@app.post("/ask", response_model=AskResponse)
-async def ask(req: AskRequest):
-    """
-    Fan-out: RAG (+ citations) + tools (price, sell/wait, weather, NDVI) in parallel.
-    Returns fused answer + sources + raw tool outputs for transparency.
-    """
-    return await answer(req)

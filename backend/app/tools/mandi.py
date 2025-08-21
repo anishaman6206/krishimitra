@@ -96,7 +96,7 @@ async def _fetch_xml_records(commodity: str, limit: int = 200, offset: int = 0,
     api_cache_key = f"api_call:{'|'.join(cache_parts)}"
     
     # Try cache first (5 minute TTL for API calls)
-    from backend.app.utils.cache import get_json, set_json
+    from app.utils.cache import get_json, set_json
     cached_result = await get_json(api_cache_key, "price")
     if cached_result:
         print(f"💾 API call cache hit: {len(cached_result)} records")

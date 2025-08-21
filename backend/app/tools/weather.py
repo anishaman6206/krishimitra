@@ -42,6 +42,7 @@ async def forecast_24h(lat: float, lon: float, tz: str = "auto") -> Dict[str, An
 
     total_rain = float(sum(x or 0.0 for x in rains)) if rains else 0.0
     max_temp = float(max(temps)) if temps else None
+    min_temp = float(min(temps)) if temps else None
     max_wind_kmh = float(max(winds)) if winds else None
 
     # Build compact 7-day list
@@ -73,7 +74,9 @@ async def forecast_24h(lat: float, lon: float, tz: str = "auto") -> Dict[str, An
         "times": times,
         "total_rain_next_24h_mm": total_rain,
         "max_temp_next_24h_c": max_temp,
+        "min_temp_next_24h_c": min_temp,
         "max_wind_next_24h_kmh": max_wind_kmh,
+        "max_wind_next_24h_ms": max_wind_kmh / 3.6 if max_wind_kmh else None,  # Convert km/h to m/s
         "daily": daily_list,               # <-- 7-day highs/lows here
         "source": "Open-Meteo",
     }

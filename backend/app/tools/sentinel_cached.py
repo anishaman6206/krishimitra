@@ -2,7 +2,7 @@
 import time
 from typing import Optional, Dict, Any
 from app.utils.cache import get_json, set_json, get_bytes, set_bytes
-from app.tools.sentinel import ndvi_snapshot, ndvi_quicklook
+from app.tools.sentinel import ndvi_snapshot, ndvi_quicklook, sentinel_summary
 
 def t(): return time.perf_counter()
 
@@ -101,3 +101,71 @@ async def ndvi_quicklook_cached(
         print(f"⏱️  NDVI quicklook: {total_ms}ms (no data available)")
     
     return fresh
+
+
+async def sentinel_summary_cached(
+    lat: float,
+    lon: float,
+    farm_size_meters: int = 200,
+    recent_days: int = 20,
+    resolution: int = 10,
+    debug: bool = False
+) -> Dict[str, Any]:
+    """
+    Cached wrapper for comprehensive sentinel satellite summary.
+    Includes NDVI, NDMI, NDWI, LAI with farmer-friendly advice.
+    Cache TTL: 7 days (168 hours)
+    """
+    t0 = t()
+    
+    # Build cache key with rounded coordinates
+    lat_rounded = round(lat, 3)  # ~100m precision
+    lon_rounded = round(lon, 3)
+    cache_key = f"sentinel_summary:{lat_rounded}:{lon_rounded}:size{farm_size_meters}:days{recent_days}:res{resolution}"
+    
+    # Try cache first
+    cached = await get_json(cache_key, "sentinel")
+    if cached is not None:
+        total_ms = round((t() - t0) * 1000)
+        print(f"💾 Sentinel summary cached for 168h: {cache_key[:60]}...")
+        print(f"⏱️  Sentinel summary: {total_ms}ms (cached)")
+        return cached
+    
+    # Cache miss - fetch fresh comprehensive data
+    print(f"🛰️  Fetching fresh comprehensive sentinel data for lat={lat}, lon={lon}...")
+    
+    try:
+        fresh = await sentinel_summary(
+            lat=lat,
+            lon=lon,
+            farm_size_meters=farm_size_meters,
+            recent_days=recent_days,
+            resolution=resolution
+        )
+        
+        if fresh:
+            # Cache for 7 days (check what parameters set_json actually takes)
+            await set_json(cache_key, fresh, "sentinel")
+            
+            total_ms = round((t() - t0) * 1000)
+            print(f"⏱️  Sentinel summary: {total_ms}ms (fresh)")
+            
+            if debug:
+                fresh["_debug"] = {
+                    "cache_key": cache_key,
+                    "fetch_time_ms": total_ms,
+                    "farm_size_m": farm_size_meters,
+                    "days_window": recent_days
+                }
+            
+            return fresh
+        else:
+            total_ms = round((t() - t0) * 1000)
+            print(f"⏱️  Sentinel summary: {total_ms}ms (no data)")
+            return {"error": "No satellite data available"}
+            
+    except Exception as e:
+        total_ms = round((t() - t0) * 1000)
+        print(f"❌ Sentinel summary error: {e}")
+        print(f"⏱️  Sentinel summary: {total_ms}ms (error)")
+        return {"error": str(e)}

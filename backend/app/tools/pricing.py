@@ -6,7 +6,6 @@ import datetime as dt
 import time
 from typing import Optional, Dict, Any, List
 
-
 import numpy as np
 import pandas as pd
 from joblib import load
@@ -35,26 +34,23 @@ def _load_artifacts():
     """Load p20/p50/p80 LightGBM models, meta.json, and encoder.json (once)."""
     global _M20, _M50, _M80, _META, _ENC
     if _M50 is None:
-        _M20 = load(_artifact_path("model_p20.joblib"))
-        _M50 = load(_artifact_path("model_p50.joblib"))
-        _M80 = load(_artifact_path("model_p80.joblib"))
-        with open(_artifact_path("meta.json"), "r") as f:
-            _META = json.load(f)
-        # encoder is optional but recommended
+        try:
+            _M20 = load(_artifact_path("model_p20.joblib"))
+            _M50 = load(_artifact_path("model_p50.joblib"))
+            _M80 = load(_artifact_path("model_p80.joblib"))
+            with open(_artifact_path("meta.json"), "r") as f:
+                _META = json.load(f)
+        except Exception as e:
+            raise RuntimeError(f"Pricing models not available: {e}")
+
         enc_path = _artifact_path("encoder.json")
         if os.path.exists(enc_path):
             with open(enc_path, "r", encoding="utf-8") as f:
                 _ENC = json.load(f)
         else:
-            _ENC = {
-                "commodity": {},
-                "state": {},
-                "district": {},
-                "market": {},
-                "variety": {},
-                "grade": {}
-            }
+            _ENC = {"commodity": {}, "state": {}, "district": {}, "market": {}, "variety": {}, "grade": {}}
     return _M20, _M50, _M80, _META, _ENC
+
 
 
 # --------------------------------------------------------------------------------------
@@ -231,26 +227,27 @@ async def advise_sell_or_wait(
     t0 = time.perf_counter()
     
     # 1) Current-day price row - use injected price if available
+        # 1) Current-day price row - use injected price if available
     if price_context and isinstance(price_context, dict):
         price_row = price_context
         print(f"[pricing] Using provided price context (no fetch)")
     else:
-        # FALLBACK: fetch price (prefer cached version)
         print(f"[pricing] Fetching price (no context provided)")
-        price_row = await latest_price(
-            commodity=commodity,
-            state=state, district=district, market=market,
-            variety=variety, grade=grade,
-            cache_ttl_ok=True, debug=debug
-        )
-    
-    now_price = float(price_row["modal_price_inr_per_qtl"])
-    # prefer API date string if present; else today
-    adate = price_row.get("arrival_date")
+        try:
+            price_row = await latest_price(
+                commodity=commodity,
+                state=state, district=district, market=market,
+                variety=variety, grade=grade,
+                cache_ttl_ok=True, debug=debug
+            )
+        except Exception as e:
+            return {"error": f"price_fetch_failed: {e}"}
+
     try:
-        now_date = dt.datetime.strptime(adate, "%Y-%m-%d").date() if adate else dt.date.today()
+        now_price = float(price_row["modal_price_inr_per_qtl"])
     except Exception:
-        now_date = dt.date.today()
+        return {"error": "invalid_price_row", "context": price_row}
+
 
     # 2) Build categorical IDs using exported encoder
     _, _, _, _, enc = _load_artifacts()
@@ -266,7 +263,7 @@ async def advise_sell_or_wait(
     # 3) Forecast horizon
     fc = _forecast_horizon_from_global_models(
         now_price=now_price,
-        now_date=now_date,
+        now_date=dt.date.today(),
         ids=ids,
         horizon_days=horizon_days
     )
@@ -290,8 +287,8 @@ async def advise_sell_or_wait(
     p20_h = float(last["p20_adj"])
     p80_h = float(last["p80_adj"])
 
-    MIN_UPLIFT_INR = float(os.getenv("SELLWAIT_MIN_UPLIFT_INR", "25"))   # minimum ₹ upside to WAIT
-    MIN_PROB_UP   = float(os.getenv("SELLWAIT_MIN_PROB", "0.60"))        # need ≥60% chance of upside
+    MIN_UPLIFT_INR = float(os.getenv("SELLWAIT_MIN_UPLIFT_INR", "15"))   # minimum ₹ upside to WAIT (reduced from 25)
+    MIN_PROB_UP   = float(os.getenv("SELLWAIT_MIN_PROB", "0.55"))        # need ≥55% chance of upside (reduced from 60%)
     MIN_TREND_DPD = float(os.getenv("SELLWAIT_MIN_TREND_INR_PER_DAY", "0.0"))  # non-negative slope
 
 
